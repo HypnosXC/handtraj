@@ -12,6 +12,38 @@ from .. import fncsmpl, fncsmpl_extensions
 from .. import transforms as tf
 from ..tensor_dataclass import TensorDataclass
 
+class HandTrainingData(TensorDataclass):
+    # T_world_root: Float[Tensor, "*#batch timesteps 7"]
+    # """Transformation from the world frame to the root frame at each timestep."""
+
+    mano_betas: Float[Tensor, "*#batch 10"]
+    """Body shape parameters."""
+
+    mano_pose: Float[Tensor, "*#batch timesteps 51"]
+
+    rgb_frames: Float[Tensor, "*#batch timesteps 3 h 224"]
+
+    # @property
+    # def joints_wrt_world(self) -> Tensor:
+    #     return tf.SE3(self.T_world_cpf[..., None, :]) @ self.joints_wrt_cpf
+    
+    # joints_wrt_cpf: Float[Tensor, "*#batch timesteps 21 3"]
+    # """Joint positions relative to the central pupil frame."""
+
+    # mask: Bool[Tensor, "*#batch timesteps"]
+    # """Mask to support variable-length sequence."""
+    intrinsics: Float[Tensor, "*#batch 4"]
+    """Camera intrinsics: fx, fy, ppx, ppy."""
+
+    extrinsics: Float[Tensor, "*#batch 3 4"]
+    """Camera extrinsics: 3x4 matrix."""
+
+    # hand_quats: Float[Tensor, "*#batch timesteps 30 4"] | None
+    # """Local orientations for each hand joint."""
+
+    mano_side: str
+    """Side of the hand, either 'left' or 'right'."""
+
 
 class EgoTrainingData(TensorDataclass):
     """Dictionary of tensors we use for EgoAllo training."""
