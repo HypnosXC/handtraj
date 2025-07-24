@@ -38,14 +38,14 @@ class Args:
             ...
         ...
     """
-    checkpoint_dir: Path = Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/first_try/v2/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     smplh_npz_path: Path = Path("./data/smplh/neutral/model.npz")
 
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""
     start_index: int = 0
     """Index within the downsampled trajectory to start inference at."""
-    traj_length: int = 128
+    traj_length: int = 1080
     """How many timesteps to estimate body motion for."""
     num_samples: int = 1
     """Number of samples to take."""
