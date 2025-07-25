@@ -21,7 +21,9 @@ class HandTrainingData(TensorDataclass):
 
     mano_pose: Float[Tensor, "*#batch timesteps 51"]
 
-    rgb_frames: Float[Tensor, "*#batch timesteps 3 h 224"]
+    mano_joint_3d: Float[Tensor, "*#batch timesteps 21 3"]
+
+    rgb_frames: Float[Tensor, "*#batch timesteps h w 3"]
 
     # @property
     # def joints_wrt_world(self) -> Tensor:

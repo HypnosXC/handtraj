@@ -265,8 +265,8 @@ class DexYCBDataset():
     for id_sub, id_ser, id_seq in tqdm.tqdm(self._mapping, desc="Loading dataset"):
         meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
                                  os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq],"meta.yml")
-        pose_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                 os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq], "pose.npz")
+        # pose_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+        #                          os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq], "pose.npz")
         with open(meta_file, 'r') as f:
             meta = yaml.load(f, Loader=yaml.FullLoader)
         # self._num_frames.append(meta['num_frames'])
@@ -288,8 +288,8 @@ class DexYCBDataset():
         with open(extrinsic_file, 'r') as f:
             extrinsics = yaml.load(f, Loader=yaml.FullLoader)
         T = extrinsics['extrinsics']
-        data = np.load(pose_file)
-        self.poses.append(data['pose_m'][start_frame:start_frame + 64, :, :])
+        # data = np.load(pose_file)
+        # self.poses.append(data['pose_m'][start_frame:start_frame + 64, :, :])
         np_T = np.array(T[_SERIALS[id_ser]])
 
         self.extrinsics.append(np_T.reshape(3, 4))
@@ -310,7 +310,7 @@ class DexYCBDataset():
         'mano_side': self._mano_side[idx],
         'mano_betas': self._mano_betas[idx],
         'extrinsics': self.extrinsics[idx],
-        'poses': self.poses[idx]
+        # 'mano_poses': self.poses[idx]
         # 'hand_3d_joints': self.hand_3d_joints[idx],
     }
     return sample
@@ -333,12 +333,14 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
 
     shapes = {
         'data_dir': (1,),  # single data directory path
-        'poses': (64, 1, 51),  # 64 frames, 1 hand, 51 joints
+        'mano_poses': (64, 1, 51),  # 64 frames, 1 hand, 51 joints
         'start_frame': (1,),  # single start frame
         'intrinsics': (4,),  # fx,fy,ppx,ppy
         'mano_side': (1,),  # single side (left or right)
         'mano_betas': (10,),  # 10 betas for MANO model 
         'extrinsics': (3, 4),  # 3x4 matrix for extrinsics
+        'mano_joint_3d':(64, 1, 21, 3),  # 64 frames, 21 joints, 3D coordinates
+        # 'rgb_frames': (64, 3, 480, 640),  # 64 frames, RGB images of size 480x640
     }
 
     str_dt = h5py.string_dtype('utf-8', None)
@@ -349,7 +351,9 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
         'mano_side':str_dt,
         'mano_betas':'f4',
         'extrinsics':'f4',
-        'poses':'f4'
+        'mano_poses':'f4',
+        'mano_joint_3d':'f4',
+        # 'rgb_frames':'f4',
     }
 
     # breakpoint()  # Debugging breakpoint to inspect the datasets
@@ -361,7 +365,9 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
     # (Pdb) data['pose_y'].shape
     # (74, 5, 7)
 
+    # breakpoint()
 
+    
 
     with h5py.File(hdf5_path, 'w') as f:
         for split in ['train', 'val', 'test']:
@@ -386,13 +392,28 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
                 ds_data_dir = grp['data_dir']
                 ds_data_dir[idx] = sample['data_dir']
 
-                # Write poses
-                ds_poses = grp['poses']
-                ds_poses[idx] = sample['poses']
-
-                # Write start_frame
                 ds_start_frame = grp['start_frame']
                 ds_start_frame[idx] = sample['start_frame']
+
+                poses_list = []
+                joints_list = []
+                for i in range(sample['start_frame'], sample['start_frame'] + 64):
+                    mano_labels_file = os.path.join(sample['data_dir'], f'labels_{i:06d}.npz')
+                    # mano_joint_file = os.path.join(sample['data_dir'], 'mano_joints', f'joints_{i:06d}.npy')
+                    label = np.load(mano_labels_file)
+                    mano_pose = label['pose_m']
+                    mano_joint = label['joint_3d']
+                    assert mano_pose.shape == (1, 51), f"Expected mano_pose shape (1, 51), got {mano_pose.shape}"
+                    assert mano_joint.shape == (1,21, 3), f"Expected mano_joint shape (21, 3), got {mano_joint.shape}"
+                    poses_list.append(mano_pose)
+                    joints_list.append(mano_joint)
+
+                # Write poses
+                ds_mano_poses = grp['mano_poses']
+                ds_mano_poses[idx] = np.array(poses_list)
+
+                ds_mano_joint_3d = grp['mano_joint_3d']
+                ds_mano_joint_3d[idx] = np.array(joints_list)
 
                 # Write intrinsics
                 ds_intrinsics = grp['intrinsics']
