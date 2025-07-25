@@ -49,7 +49,7 @@ def main(
     dataset_files_path: Path,
     subseq_len: int = 128,
     guidance_inner: bool = False,
-    checkpoint_dir: Path = Path("./egoallo_checkpoint_april13/checkpoints_3000000/"),
+    checkpoint_dir: Path = Path("./experiments/first_try/v2/checkpoints_400000/"),#Path("./egoallo_checkpoint_april13/checkpoints_3000000/"),
     smplh_npz_path: Path = Path("./data/smplh/neutral/model.npz"),
     num_samples: int = 1,
 ) -> None:
