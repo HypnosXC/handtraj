@@ -157,7 +157,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
-        return self.N\
+        return self.N
 
     
     def hamer_output(self,index):
