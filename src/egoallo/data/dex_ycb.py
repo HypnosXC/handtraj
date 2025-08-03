@@ -1,3 +1,5 @@
+import sys
+
 from pathlib import Path
 from typing import Any, Literal
 
@@ -8,7 +10,7 @@ import torch.utils
 import torch.utils.data
 import os
 import imageio.v3 as iio
-
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
 from egoallo.data.dataclass import HandTrainingData
@@ -142,7 +144,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
             kwargs["mano_side"] = dataset['mano_side'][index][0].decode('utf-8')
             data_dir = dataset['data_dir'][index][0].decode('utf-8')
-            breakpoint()
+            # breakpoint()
             start_frame = dataset['start_frame'][index]
             rgb_frames = []
             for i in range(start_frame[0], start_frame[0] + self._subseq_len):
@@ -155,7 +157,8 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
-        return self.N
+        return self.N\
+
     
     def hamer_output(self,index):
         sample = self.__getitem__(index)
@@ -233,7 +236,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             # render_rgb = (render_rgb * 255).astype(np.uint8)
             render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
                                                                intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
-            breakpoint()
+            # breakpoint()
             border_width = 10
             composited = np.where(
                 binary_dilation(
@@ -293,5 +296,7 @@ if __name__ == "__main__":
     # joint_3d_calculated[0,0]
     # hamer_output = dataset.hamer_output(0)
     # print(f"Sample mano_betas shape: {sample.mano_betas.shape}")
+    print(f"Sample dir: {dir(sample)}")
+    print(sample.mano_betas.shape,sample.mano_pose.shape)
     print(f"Sample rgb_frames shape: {sample.rgb_frames.shape}")
     print(f"Sample mano_side: {sample.mano_side}")
