@@ -586,6 +586,8 @@ def fourier_encode(
         dim=-1,
     )
 
+import math
+import torch.nn.init as init
 
 @dataclass(frozen=True)
 class TransformerBlockConfig:
@@ -599,6 +601,8 @@ class TransformerBlockConfig:
     use_rope_embedding: bool
     use_film_noise_conditioning: bool
     xattn_mode: Literal["kv_from_cond_q_from_x", "kv_from_x_q_from_cond"]
+    ista_step_size: float = 0.1
+    ista_lambd: float = 0.5
 
 
 class TransformerBlock(nn.Module):
@@ -606,9 +610,8 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, config: TransformerBlockConfig) -> None:
         super().__init__()
-        self.sattn_qkv_proj = nn.Linear(
-            config.d_latent, config.d_latent * 3, bias=False
-        )
+        self.sattn_qkv_shared = nn.Linear(config.d_latent,
+                                          config.d_latent, bias=False)
         self.sattn_out_proj = nn.Linear(config.d_latent, config.d_latent, bias=False)
 
         self.layernorm1 = nn.LayerNorm(config.d_latent)
@@ -622,30 +625,25 @@ class TransformerBlock(nn.Module):
         )
 
         if config.include_xattn:
-            self.xattn_kv_proj = nn.Linear(
-                config.d_latent, config.d_latent * 2, bias=False
-            )
-            self.xattn_q_proj = nn.Linear(config.d_latent, config.d_latent, bias=False)
             self.xattn_layernorm = nn.LayerNorm(config.d_latent)
             self.xattn_out_proj = nn.Linear(
                 config.d_latent, config.d_latent, bias=False
             )
 
-        self.norm_no_learnable = nn.LayerNorm(
-            config.d_feedforward, elementwise_affine=False, bias=False
-        )
-        self.activation = {"gelu": nn.GELU, "relu": nn.ReLU}[config.activation]()
-        self.dropout = nn.Dropout(config.dropout_p)
+        self.dict_weight = nn.Parameter(torch.Tensor(config.d_latent,config.d_latent))
+        with torch.no_grad():
+            init.kaiming_uniform_(self.dict_weight)
+        # self.step_size = nn.Parameter(torch.tensor(0.1))
+        # self.lambd = nn.Parameter(torch.tensor(0.5))      
 
-        self.mlp0 = nn.Linear(config.d_latent, config.d_feedforward)
+        self.norm_no_learnable = nn.LayerNorm(
+            config.d_latent, elementwise_affine=False, bias=False
+        )
         self.mlp_film_cond_proj = (
-            zero_module(
-                nn.Linear(config.d_noise_emb, config.d_feedforward * 2, bias=False)
-            )
+            zero_module(nn.Linear(config.d_noise_emb, config.d_latent * 2, bias=False))
             if config.use_film_noise_conditioning
             else None
         )
-        self.mlp1 = nn.Linear(config.d_feedforward, config.d_latent)
         self.config = config
 
     def forward(
@@ -667,49 +665,33 @@ class TransformerBlock(nn.Module):
             assert cond is not None
             x = self.xattn_layernorm(x + self._xattn(x, attn_mask, cond=cond))
 
-        mlp_out = x
-        mlp_out = self.mlp0(mlp_out)
-        mlp_out = self.activation(mlp_out)
-
-        # FiLM-style conditioning.
         if self.mlp_film_cond_proj is not None:
             scale, shift = torch.chunk(
                 self.mlp_film_cond_proj(noise_emb), chunks=2, dim=-1
             )
-            assert scale.shape == shift.shape == (batch, config.d_feedforward)
-            mlp_out = (
-                self.norm_no_learnable(mlp_out) * (1.0 + scale[:, None, :])
+            assert scale.shape == shift.shape == (batch, d_latent)
+            x = (
+                self.norm_no_learnable(x) * (1.0 + scale[:, None, :])
                 + shift[:, None, :]
             )
 
-        mlp_out = self.dropout(mlp_out)
-        mlp_out = self.mlp1(mlp_out)
+        x = self._ista_update(x, config.ista_step_size, config.ista_lambd)       
 
-        x = self.layernorm2(x + mlp_out)
+        x = self.layernorm2(x)
         assert x.shape == (batch, time, d_latent)
         return x
 
     def _sattn(self, x: Tensor, attn_mask: Tensor | None) -> Tensor:
         """Multi-head self-attention."""
         config = self.config
-        q, k, v = rearrange(
-            self.sattn_qkv_proj(x),
-            "b t (qkv nh dh) -> qkv b nh t dh",
-            qkv=3,
-            nh=config.n_heads,
-        )
+        w = rearrange(self.sattn_qkv_shared(x), "b t (h d) -> b h t d", h=config.n_heads)
+
         if self.rotary_emb is not None:
-            q = self.rotary_emb.rotate_queries_or_keys(q, seq_dim=-2)
-            k = self.rotary_emb.rotate_queries_or_keys(k, seq_dim=-2)
+            w = self.rotary_emb.rotate_queries_or_keys(w, seq_dim=-2)
         x = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, dropout_p=config.dropout_p, attn_mask=attn_mask
-        )
-        x = self.dropout(x)
-        x = rearrange(x, "b nh t dh -> b t (nh dh)", nh=config.n_heads)
-        x = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, dropout_p=config.dropout_p
-        )
-        x = self.dropout(x)
+            w, w, w, dropout_p=config.dropout_p, attn_mask=attn_mask
+        )  # (b, h, t, d)
+
         x = rearrange(x, "b nh t dh -> b t (nh dh)", nh=config.n_heads)
         x = self.sattn_out_proj(x)
         return x
@@ -717,27 +699,13 @@ class TransformerBlock(nn.Module):
     def _xattn(self, x: Tensor, attn_mask: Tensor | None, cond: Tensor) -> Tensor:
         """Multi-head cross-attention."""
         config = self.config
-        k, v = rearrange(
-            self.xattn_kv_proj(
-                {
-                    "kv_from_cond_q_from_x": cond,
-                    "kv_from_x_q_from_cond": x,
-                }[self.config.xattn_mode]
-            ),
-            "b t (qk nh dh) -> qk b nh t dh",
-            qk=2,
-            nh=config.n_heads,
-        )
-        q = rearrange(
-            self.xattn_q_proj(
-                {
-                    "kv_from_cond_q_from_x": x,
-                    "kv_from_x_q_from_cond": cond,
-                }[self.config.xattn_mode]
-            ),
-            "b t (nh dh) -> b nh t dh",
-            nh=config.n_heads,
-        )
+        w_x = rearrange(self.xattn_shared(x),   "b t (h d) -> b h t d", h=config.n_heads)  # (B,H,T,D)
+        w_c = rearrange(self.xattn_shared(cond), "b s (h d) -> b h s d", h=config.n_heads)  # (B,H,S,D)
+
+        q = w_x
+        k = w_c
+        v = w_c
+
         if self.rotary_emb is not None:
             q = self.rotary_emb.rotate_queries_or_keys(q, seq_dim=-2)
             k = self.rotary_emb.rotate_queries_or_keys(k, seq_dim=-2)
@@ -748,7 +716,31 @@ class TransformerBlock(nn.Module):
         x = self.xattn_out_proj(x)
 
         return x
+    
+    def _ista_update(self, x,ista_step_size,ista_lambd) -> torch.Tensor:
+        D = self.dict_weight
+        Dtx = F.linear(x, D.t(), bias=None)
+        DtDx = F.linear(F.linear(x, D, bias=None), D.t(), bias=None)
+        updated = F.relu(x + ista_step_size * (Dtx - DtDx) - ista_step_size * ista_lambd)
+        return updated
 
+    # @torch.no_grad()
+    # def _safe_softplus(self, x):
+    #     return torch.log1p(torch.exp(x))
+
+    # def _ista_update(self, x: torch.Tensor) -> torch.Tensor:
+    #     # D: (d_latent, d_latent)
+    #     D = self.dict_weight
+    #     # D^time D x
+    #     x1 = F.linear(x, D, bias=None)
+    #     DtDx = F.linear(x1, D.t(), bias=None)
+    #     # D^time x
+    #     Dtx = F.linear(x, D.t(), bias=None)
+
+    #     eta = torch.clamp(self._safe_softplus(self.step_size), 1e-6, 10.0)
+    #     lam = torch.clamp(self._safe_softplus(self.lambd), 0.0, 10.0)
+    #     update = eta * (Dtx - DtDx) - eta * lam
+    #     return F.relu(x + update)  # 返回“更新后”的表示
 
 def zero_module(module):
     """Zero out the parameters of a module and return it."""
