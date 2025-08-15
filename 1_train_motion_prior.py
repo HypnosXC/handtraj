@@ -232,10 +232,10 @@ def run_training(
                 accelerator.save_state(str(checkpoint_path))
                 logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-                # Keep checkpoints from only every 10k steps.
+                # Keep checkpoints from only every 100k steps.
                 if prev_checkpoint_path is not None:
                     shutil.rmtree(prev_checkpoint_path)
-                prev_checkpoint_path = None if step % 10_000 == 0 else checkpoint_path
+                prev_checkpoint_path = None if step % 100_000 == 0 else checkpoint_path
                 del checkpoint_path
     if use_wandb_logger:
         run.finish()

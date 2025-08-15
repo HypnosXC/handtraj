@@ -677,22 +677,21 @@ class TransformerBlock(nn.Module):
             assert cond is not None
             x = self.xattn_layernorm(x + self._xattn(x, attn_mask, cond=cond))
 
+        x_ff_in = self.norm_no_learnable(x)
         if self.mlp_film_cond_proj is not None:
-            scale, shift = torch.chunk(
-                self.mlp_film_cond_proj(noise_emb), chunks=2, dim=-1
-            )
+            scale, shift = torch.chunk(self.mlp_film_cond_proj(noise_emb), 2, dim=-1)
             assert scale.shape == shift.shape == (batch, d_latent)
-            x = (
-                self.norm_no_learnable(x) * (1.0 + scale[:, None, :])
-                + shift[:, None, :]
-            )
-        if self.fix_lambda:
-            x = self._ista_update_fix_lambda_step_size(x, config.ista_step_size, config.ista_lambd)
-        else:
-            x = self._ista_update(x)
+            x_ff_in = x_ff_in * (1.0 + scale[:, None, :]) + shift[:, None, :]
 
-        x = self.layernorm2(x)
-        assert x.shape == (batch, time, d_latent)
+        if self.fix_lambda:
+            updated = self._ista_update_fix_lambda_step_size(
+                x_ff_in, config.ista_step_size, config.ista_lambd
+            )
+        else:
+            updated = self._ista_update(x_ff_in)
+        mlp_out = updated - x_ff_in
+        x = self.layernorm2(x + mlp_out)
+
         return x
 
     def _sattn(self, x: Tensor, attn_mask: Tensor | None) -> Tensor:
