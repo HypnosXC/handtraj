@@ -142,7 +142,6 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
             kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
-            print(dataset['mano_side'][index][0].decode('utf-8'))
             if dataset['mano_side'][index][0].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
             else:
