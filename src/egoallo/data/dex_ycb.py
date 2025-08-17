@@ -22,7 +22,7 @@ import pyrender
 import trimesh
 import cv2
 from scipy.ndimage import binary_dilation
-
+mano_side_str=['left','right']
 def render_joint(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -142,7 +142,11 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
             kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
-            kwargs["mano_side"] = dataset['mano_side'][index][0].decode('utf-8')
+            print(dataset['mano_side'][index][0].decode('utf-8'))
+            if dataset['mano_side'][index][0].decode('utf-8') == 'left':
+                kwargs["mano_side"] = torch.zeros(1)
+            else:
+                kwargs["mano_side"] = torch.ones(1)
             data_dir = dataset['data_dir'][index][0].decode('utf-8')
             # breakpoint()
             start_frame = dataset['start_frame'][index]
@@ -205,7 +209,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         mano_layer = ManoLayer(
             flat_hand_mean=False,
             ncomps=45,
-            side=sample.mano_side,
+            side=mano_side_str[(int)(sample.mano_side.numpy())],
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
         vertices, joints = mano_layer(
