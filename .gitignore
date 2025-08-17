@@ -20,6 +20,7 @@ lightning_logs/
 outputs/
 
 data/
+tmp/
 egoallo_checkpoint_*
 egoallo_example_*
 *.slurm
