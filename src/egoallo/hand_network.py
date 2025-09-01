@@ -12,7 +12,7 @@ from loguru import logger
 from rotary_embedding_torch import RotaryEmbedding
 from torch import Tensor, nn
 
-from .fncsmpl import SmplhModel, SmplhShapedAndPosed
+from manopth.manolayer import ManoLayer
 from .tensor_dataclass import TensorDataclass
 from .transforms import SE3, SO3
 
@@ -25,47 +25,50 @@ def project_rotmats_via_svd(
     return torch.einsum("...ij,...jk->...ik", u, vh)
 
 
-class EgoDenoiseTraj(TensorDataclass):
+class HandDenoiseTraj(TensorDataclass):
     """Data structure for denoising. Contains tensors that we are denoising, as
     well as utilities for packing + unpacking them."""
 
-    betas: Float[Tensor, "*#batch timesteps 16"]
-    """Body shape parameters. We don't really need the timesteps axis here,
+    mano_betas: Float[Tensor, "*#batch timesteps 10"]
+    """Hand shape parameters. We don't really need the timesteps axis here,
     it's just for convenience."""
 
-    body_rotmats: Float[Tensor, "*#batch timesteps 21 3 3"]
-    """Local orientations for each body joint."""
+    mano_poses: Float[Tensor, "*#batch timesteps 15 3"]
+    """Relative poses for each hand joint."""
 
-    contacts: Float[Tensor, "*#batch timesteps 21"]
-    """Contact boolean for each joint."""
+    global_orientation: Float[Tensor, "*#batch timesteps 1 3"]
+    """Global Orientation for hand."""
 
-    hand_rotmats: Float[Tensor, "*#batch timesteps 30 3 3"] | None
-    """Local orientations for each body joint."""
+    camera_pose: Float[Tensor, "*#batch timesteps 1 3"]
+    """Global Camera translation"""
 
+    mano_side: Float[Tensor, "*#batch timesteps 1 1"]
+    """right or left hand"""
     @staticmethod
-    def get_packed_dim(include_hands: bool) -> int:
-        packed_dim = 16 + 21 * 9 + 21
-        if include_hands:
-            packed_dim += 30 * 9
+    def get_packed_dim() -> int:
+        packed_dim = 10 + 15 * 3 + 3 + 3 + 1
         return packed_dim
 
-    def apply_to_body(self, body_model: SmplhModel) -> SmplhShapedAndPosed:
-        device = self.betas.device
-        dtype = self.betas.dtype
-        assert self.hand_rotmats is not None
-        shaped = body_model.with_shape(self.betas)
-        posed = shaped.with_pose(
-            T_world_root=SE3.identity(device=device, dtype=dtype).parameters(),
-            local_quats=SO3.from_matrix(
-                torch.cat([self.body_rotmats, self.hand_rotmats], dim=-3)
-            ).wxyz,
+    def apply_to_hand(self, mano_model: ManoLayer) -> tuple[torch.Tensor, torch.Tensor]:
+        mano_layer = ManoLayer(
+            flat_hand_mean=False,
+            ncomps=45,
+            side=mano_side_str[(int)(self.mano_side.numpy())],
+            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
-        return posed
+        vertices, joints = mano_layer(
+            torch.cat((self.mano_pose,self.global_orientation),dim=-1),
+            self.mano_betas.unsqueeze(0).repeat(self.mano_pose.shape[0], 1),
+            self.camera_pose
+        )
+        vertices = vertices/ 1000  # Convert to meters
+        faces_m = mano_layer.th_faces
+        return vertices, faces_m
 
     def pack(self) -> Float[Tensor, "*#batch timesteps d_state"]:
         """Pack trajectory into a single flattened vector."""
-        (*batch, time, num_joints, _, _) = self.body_rotmats.shape
-        assert num_joints == 21
+        (*batch, time, num_joints, _, _) = self.mano_poses.shape
+        assert num_joints == 15
         return torch.cat(
             [
                 x.reshape((*batch, time, -1))
@@ -81,7 +84,7 @@ class EgoDenoiseTraj(TensorDataclass):
         x: Float[Tensor, "*#batch timesteps d_state"],
         include_hands: bool,
         project_rotmats: bool = False,
-    ) -> EgoDenoiseTraj:
+    ) -> HandDenoiseTraj:
         """Unpack trajectory from a single flattened vector.
 
         Args:
@@ -89,37 +92,30 @@ class EgoDenoiseTraj(TensorDataclass):
             project_rotmats: If True, project the rotation matrices to SO(3) via SVD.
         """
         (*batch, time, d_state) = x.shape
-        assert d_state == cls.get_packed_dim(include_hands)
+        assert d_state == cls.get_packed_dim()
 
-        if include_hands:
-            betas, body_rotmats_flat, contacts, hand_rotmats_flat = torch.split(
-                x, [16, 21 * 9, 21, 30 * 9], dim=-1
-            )
-            body_rotmats = body_rotmats_flat.reshape((*batch, time, 21, 3, 3))
-            hand_rotmats = hand_rotmats_flat.reshape((*batch, time, 30, 3, 3))
-            assert betas.shape == (*batch, time, 16)
-        else:
-            betas, body_rotmats_flat, contacts = torch.split(
-                x, [16, 21 * 9, 21], dim=-1
-            )
-            body_rotmats = body_rotmats_flat.reshape((*batch, time, 21, 3, 3))
-            hand_rotmats = None
-            assert betas.shape == (*batch, time, 16)
+        mano_betas, mano_poses, global_orientation,camera_pose,mano_side = torch.split(
+            x, [10, 15 * 3, 3, 3, 1], dim=-1
+        )
+        mano_poses = mano_poses.reshape((*batch, time, 15, 3))
+        hand_rotmats = None
+        assert mano_betas.shape == (*batch, time, 10)
 
-        if project_rotmats:
-            # We might want to handle the -1 determinant case as well.
-            body_rotmats = project_rotmats_via_svd(body_rotmats)
+        # if project_rotmats:
+        #     # We might want to handle the -1 determinant case as well.
+        #     hand = project_rotmats_via_svd(body_rotmats)
 
-        return EgoDenoiseTraj(
-            betas=betas,
-            body_rotmats=body_rotmats,
-            contacts=contacts,
-            hand_rotmats=hand_rotmats,
+        return HandDenoiseTraj(
+            mano_betas=mano_betas,
+            mano_poses=mano_poses,
+            global_orientation=global_orientation,
+            camera_pose=camera_pose,
+            mano_side=mano_side
         )
 
 
 @dataclass(frozen=True)
-class EgoDenoiserConfig:
+class HandDenoiserConfig:
     max_t: int = 1000
     fourier_enc_freqs: int = 3
     d_latent: int = 512
@@ -139,8 +135,6 @@ class EgoDenoiserConfig:
     )
 
     include_canonicalized_cpf_rotation_in_cond: bool = True
-    include_hands: bool = True
-    """Whether to include hand joints (+15 per hand) in the denoised state."""
 
     cond_param: Literal[
         "ours", "canonicalized", "absolute", "absrel", "absrel_global_deltas"
@@ -155,17 +149,13 @@ class EgoDenoiserConfig:
         directly.
     """
 
-    include_hand_positions_cond: bool = False
-    """Whether to include hand positions in the conditioning information."""
-
     @cached_property
     def d_cond(self) -> int:
         """Dimensionality of conditioning vector."""
 
         if self.cond_param == "ours":
             d_cond = 0
-            d_cond += 12  # Relative CPF pose, flattened 3x4 matrix.
-            d_cond += 1  # Floor height.
+            d_cond += 3 ## only palm position
             if self.include_canonicalized_cpf_rotation_in_cond:
                 d_cond += 9  # Canonicalized CPF rotation, flattened 3x3 matrix.
         elif self.cond_param == "canonicalized":
@@ -191,15 +181,16 @@ class EgoDenoiserConfig:
 
     def make_cond(
         self,
-        T_cpf_tm1_cpf_t: Float[Tensor, "batch time 7"],
-        T_world_cpf: Float[Tensor, "batch time 7"],
-        hand_positions_wrt_cpf: Float[Tensor, "batch time 6"] | None,
+        rel_palm_pose: Float[Tensor, "batch time 3"], # relative palm pose to the camera
     ) -> Float[Tensor, "batch time d_cond"]:
         """Construct conditioning information from CPF pose."""
 
-        (batch, time, _) = T_cpf_tm1_cpf_t.shape
+        (batch, time, _) = rel_palm_pose.shape
 
         # Construct device pose conditioning.
+        if self.cond_param == "ours":
+            cond = rel_palm_pose
+        '''
         if self.cond_param == "ours":
             # Compute conditioning terms. +Z is up in the world frame. We want
             # the translation to be invariant to translations in the world X/Y
@@ -285,11 +276,13 @@ class EgoDenoiserConfig:
                 ],
                 dim=-1,
             )
+        '''
         else:
             assert_never(self.cond_param)
 
         # Condition on hand poses as well.
         # We didn't use this for the paper.
+        '''
         if self.include_hand_positions_cond:
             if hand_positions_wrt_cpf is None:
                 logger.warning(
@@ -303,17 +296,18 @@ class EgoDenoiserConfig:
 
         cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)
         assert cond.shape == (batch, time, self.d_cond)
+        '''
         return cond
 
 
-class EgoDenoiser(nn.Module):
+class HandDenoiser(nn.Module):
     """Denoising network for human motion.
 
     Inputs are noisy trajectory, conditioning information, and timestep.
     Output is denoised trajectory.
     """
 
-    def __init__(self, config: EgoDenoiserConfig):
+    def __init__(self, config: HandDenoiserConfig):
         super().__init__()
 
         self.config = config
@@ -321,12 +315,12 @@ class EgoDenoiser(nn.Module):
 
         # MLP encoders and decoders for each modality we want to denoise.
         modality_dims: dict[str, int] = {
-            "betas": 16,
-            "body_rotmats": 21 * 9,
-            "contacts": 21,
+            "mano_betas": 10,
+            "mano_poses": 15 * 9,
+            "global_orientation": 3,
+            "camera_pose":3,
+            "mano_side":1
         }
-        if config.include_hands:
-            modality_dims["hand_rotmats"] = 30 * 9
 
         assert sum(modality_dims.values()) == self.get_d_state()
         self.encoders = nn.ModuleDict(
@@ -414,7 +408,7 @@ class EgoDenoiser(nn.Module):
         )
 
     def get_d_state(self) -> int:
-        return EgoDenoiseTraj.get_packed_dim(self.config.include_hands)
+        return HandDenoiseTraj.get_packed_dim()
 
     def forward(
         self,

@@ -25,15 +25,6 @@ class HandTrainingData(TensorDataclass):
 
     rgb_frames: Float[Tensor, "*#batch timesteps h w 3"]
 
-    # @property
-    # def joints_wrt_world(self) -> Tensor:
-    #     return tf.SE3(self.T_world_cpf[..., None, :]) @ self.joints_wrt_cpf
-    
-    # joints_wrt_cpf: Float[Tensor, "*#batch timesteps 21 3"]
-    # """Joint positions relative to the central pupil frame."""
-
-    # mask: Bool[Tensor, "*#batch timesteps"]
-    # """Mask to support variable-length sequence."""
     intrinsics: Float[Tensor, "*#batch 4"]
     """Camera intrinsics: fx, fy, ppx, ppy."""
 
@@ -43,8 +34,8 @@ class HandTrainingData(TensorDataclass):
     # hand_quats: Float[Tensor, "*#batch timesteps 30 4"] | None
     # """Local orientations for each hand joint."""
 
-    mano_side: str
-    """Side of the hand, either 'left' or 'right'."""
+    mano_side: Float[Tensor, "*#batch 1"]
+    """Side of the hand, either 0->'left' or 1->'right'."""
 
 
 class EgoTrainingData(TensorDataclass):
