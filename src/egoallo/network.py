@@ -642,7 +642,7 @@ class TransformerBlock(nn.Module):
         with torch.no_grad():
             init.kaiming_uniform_(self.dict_weight)
             
-        self.fix_lambda = False
+        self.fix_lambda = True
         if not self.fix_lambda:
             print("Lambda and step size are learnable parameters now.")
             self.step_size = nn.Parameter(torch.tensor(0.1))

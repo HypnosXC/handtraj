@@ -84,7 +84,8 @@ def run_training(
         print(f"wandb project name: {wandb_project_name}")
         run = wandb.init(
             entity=wandb_entity,
-            project=wandb_project_name,
+            project="white-egoallo",
+            name=wandb_project_name,
         )
     assert not experiment_dir.exists()
     accelerator = Accelerator(
