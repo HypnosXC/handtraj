@@ -139,6 +139,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             # ndarray to tensor
             kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
             kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
+            timesteps= kwargs["mano_pose"].shape[0]
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
             kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
@@ -157,6 +158,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                 rgb_image = iio.imread(rgb_path)
                 rgb_frames.append(torch.from_numpy(rgb_image))
             kwargs["rgb_frames"] = torch.stack(rgb_frames)
+            kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:

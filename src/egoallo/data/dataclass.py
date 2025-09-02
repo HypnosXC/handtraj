@@ -33,7 +33,9 @@ class HandTrainingData(TensorDataclass):
 
     # hand_quats: Float[Tensor, "*#batch timesteps 30 4"] | None
     # """Local orientations for each hand joint."""
-
+    mask: Bool[Tensor, "*#batch timesteps"]
+    """Mask to support variable-length sequence."""
+    
     mano_side: Float[Tensor, "*#batch 1"]
     """Side of the hand, either 0->'left' or 1->'right'."""
 

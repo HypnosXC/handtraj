@@ -36,13 +36,13 @@ class HandDenoiseTraj(TensorDataclass):
     mano_poses: Float[Tensor, "*#batch timesteps 15 3"]
     """Relative poses for each hand joint."""
 
-    global_orientation: Float[Tensor, "*#batch timesteps 1 3"]
+    global_orientation: Float[Tensor, "*#batch timesteps 3"]
     """Global Orientation for hand."""
 
-    camera_pose: Float[Tensor, "*#batch timesteps 1 3"]
+    camera_pose: Float[Tensor, "*#batch timesteps 3"]
     """Global Camera translation"""
 
-    mano_side: Float[Tensor, "*#batch timesteps 1 1"]
+    mano_side: Float[Tensor, "*#batch timesteps 1"]
     """right or left hand"""
     @staticmethod
     def get_packed_dim() -> int:
@@ -57,8 +57,8 @@ class HandDenoiseTraj(TensorDataclass):
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
         vertices, joints = mano_layer(
-            torch.cat((self.mano_pose,self.global_orientation),dim=-1),
-            self.mano_betas.unsqueeze(0).repeat(self.mano_pose.shape[0], 1),
+            torch.cat((self.mano_poses,self.global_orientation),dim=-1),
+            self.mano_betas.unsqueeze(0).repeat(self.mano_poses.shape[0], 1),
             self.camera_pose
         )
         vertices = vertices/ 1000  # Convert to meters
@@ -67,7 +67,7 @@ class HandDenoiseTraj(TensorDataclass):
 
     def pack(self) -> Float[Tensor, "*#batch timesteps d_state"]:
         """Pack trajectory into a single flattened vector."""
-        (*batch, time, num_joints, _, _) = self.mano_poses.shape
+        (*batch, time, num_joints, _) = self.mano_poses.shape
         assert num_joints == 15
         return torch.cat(
             [
@@ -82,7 +82,6 @@ class HandDenoiseTraj(TensorDataclass):
     def unpack(
         cls,
         x: Float[Tensor, "*#batch timesteps d_state"],
-        include_hands: bool,
         project_rotmats: bool = False,
     ) -> HandDenoiseTraj:
         """Unpack trajectory from a single flattened vector.
@@ -156,8 +155,6 @@ class HandDenoiserConfig:
         if self.cond_param == "ours":
             d_cond = 0
             d_cond += 3 ## only palm position
-            if self.include_canonicalized_cpf_rotation_in_cond:
-                d_cond += 9  # Canonicalized CPF rotation, flattened 3x3 matrix.
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":
@@ -173,8 +170,6 @@ class HandDenoiserConfig:
 
         # Add two 3D positions to the conditioning dimension if we're including
         # hand conditioning.
-        if self.include_hand_positions_cond:
-            d_cond = d_cond + 6
 
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
         return d_cond
@@ -184,119 +179,14 @@ class HandDenoiserConfig:
         rel_palm_pose: Float[Tensor, "batch time 3"], # relative palm pose to the camera
     ) -> Float[Tensor, "batch time d_cond"]:
         """Construct conditioning information from CPF pose."""
-
         (batch, time, _) = rel_palm_pose.shape
 
         # Construct device pose conditioning.
         if self.cond_param == "ours":
             cond = rel_palm_pose
-        '''
-        if self.cond_param == "ours":
-            # Compute conditioning terms. +Z is up in the world frame. We want
-            # the translation to be invariant to translations in the world X/Y
-            # directions.
-            height_from_floor = T_world_cpf[..., 6:7]
-
-            cond_parts = [
-                SE3(T_cpf_tm1_cpf_t).as_matrix()[..., :3, :].reshape((batch, time, 12)),
-                height_from_floor,
-            ]
-            if self.include_canonicalized_cpf_rotation_in_cond:
-                # We want the rotation to be invariant to rotations around the
-                # world Z axis. Visualization of what's happening here:
-                #
-                # https://gist.github.com/brentyi/9226d082d2707132af39dea92b8609f6
-                #
-                # (The coordinate frame may differ by some axis-swapping
-                # compared to the exact equations in the paper. But to the
-                # network these will all look the same.)
-                R_world_cpf = SE3(T_world_cpf).rotation().wxyz
-                forward_cpf = R_world_cpf.new_tensor([0.0, 0.0, 1.0])
-                forward_world = SO3(R_world_cpf) @ forward_cpf
-                assert forward_world.shape == (batch, time, 3)
-                R_canonical_world = SO3.from_z_radians(
-                    -torch.arctan2(forward_world[..., 1], forward_world[..., 0])
-                ).wxyz
-                assert R_canonical_world.shape == (batch, time, 4)
-                cond_parts.append(
-                    (SO3(R_canonical_world) @ SO3(R_world_cpf))
-                    .as_matrix()
-                    .reshape((batch, time, 9)),
-                )
-            cond = torch.cat(cond_parts, dim=-1)
-        elif self.cond_param == "canonicalized":
-            # Align the first timestep.
-            # Put poses so start is at origin, facing forward.
-            R_world_cpf = SE3(T_world_cpf[:, 0:1, :]).rotation().wxyz
-            forward_cpf = R_world_cpf.new_tensor([0.0, 0.0, 1.0])
-            forward_world = SO3(R_world_cpf) @ forward_cpf
-            assert forward_world.shape == (batch, 1, 3)
-            R_canonical_world = SO3.from_z_radians(
-                -torch.arctan2(forward_world[..., 1], forward_world[..., 0])
-            ).wxyz
-            assert R_canonical_world.shape == (batch, 1, 4)
-
-            R_canonical_cpf = SO3(R_canonical_world) @ SE3(T_world_cpf).rotation()
-            t_canonical_cpf = SO3(R_canonical_world) @ SE3(T_world_cpf).translation()
-            t_canonical_cpf = t_canonical_cpf - t_canonical_cpf[:, 0:1, :]
-
-            cond = (
-                SE3.from_rotation_and_translation(R_canonical_cpf, t_canonical_cpf)
-                .as_matrix()[..., :3, :4]
-                .reshape((batch, time, 12))
-            )
-        elif self.cond_param == "absolute":
-            cond = SE3(T_world_cpf).as_matrix()[..., :3, :4].reshape((batch, time, 12))
-        elif self.cond_param == "absrel":
-            cond = torch.concatenate(
-                [
-                    SE3(T_world_cpf)
-                    .as_matrix()[..., :3, :4]
-                    .reshape((batch, time, 12)),
-                    SE3(T_cpf_tm1_cpf_t)
-                    .as_matrix()[..., :3, :4]
-                    .reshape((batch, time, 12)),
-                ],
-                dim=-1,
-            )
-        elif self.cond_param == "absrel_global_deltas":
-            cond = torch.concatenate(
-                [
-                    SE3(T_world_cpf)
-                    .as_matrix()[..., :3, :4]
-                    .reshape((batch, time, 12)),
-                    SE3(T_cpf_tm1_cpf_t)
-                    .rotation()
-                    .as_matrix()
-                    .reshape((batch, time, 9)),
-                    (
-                        SE3(T_world_cpf).rotation()
-                        @ SE3(T_cpf_tm1_cpf_t).inverse().translation()
-                    ).reshape((batch, time, 3)),
-                ],
-                dim=-1,
-            )
-        '''
         else:
             assert_never(self.cond_param)
-
-        # Condition on hand poses as well.
-        # We didn't use this for the paper.
-        '''
-        if self.include_hand_positions_cond:
-            if hand_positions_wrt_cpf is None:
-                logger.warning(
-                    "Model is looking for hand conditioning but none was provided. Passing in zeros."
-                )
-                hand_positions_wrt_cpf = torch.zeros(
-                    (batch, time, 6), device=T_world_cpf.device
-                )
-            assert hand_positions_wrt_cpf.shape == (batch, time, 6)
-            cond = torch.cat([cond, hand_positions_wrt_cpf], dim=-1)
-
         cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)
-        assert cond.shape == (batch, time, self.d_cond)
-        '''
         return cond
 
 
@@ -316,7 +206,7 @@ class HandDenoiser(nn.Module):
         # MLP encoders and decoders for each modality we want to denoise.
         modality_dims: dict[str, int] = {
             "mano_betas": 10,
-            "mano_poses": 15 * 9,
+            "mano_poses": 15 * 3,
             "global_orientation": 3,
             "camera_pose":3,
             "mano_side":1
@@ -415,12 +305,9 @@ class HandDenoiser(nn.Module):
         x_t_packed: Float[Tensor, "batch time state_dim"],
         t: Float[Tensor, "batch"],
         *,
-        T_world_cpf: Float[Tensor, "batch time 7"],
-        T_cpf_tm1_cpf_t: Float[Tensor, "batch time 7"],
+        rel_palm_pose: Float[Tensor, "batch time 3"],
         project_output_rotmats: bool,
         # Observed hand positions, relative to the CPF.
-        hand_positions_wrt_cpf: Float[Tensor, "batch time 6"] | None,
-        # Attention mask for using shorter sequences.
         mask: Bool[Tensor, "batch time"] | None,
         # Mask for when to drop out / keep conditioning information.
         cond_dropout_keep_mask: Bool[Tensor, "batch"] | None = None,
@@ -429,21 +316,18 @@ class HandDenoiser(nn.Module):
         level, not a timestep."""
         config = self.config
 
-        x_t = EgoDenoiseTraj.unpack(x_t_packed, include_hands=self.config.include_hands)
-        (batch, time, num_body_joints, _, _) = x_t.body_rotmats.shape
-        assert num_body_joints == 21
+        x_t = HandDenoiseTraj.unpack(x_t_packed)
+        (batch, time, num_hand_joints, _) = x_t.mano_poses.shape
+        assert num_hand_joints == 15
 
         # Encode the trajectory into a single vector per timestep.
         x_t_encoded = (
-            self.encoders["betas"](x_t.betas.reshape((batch, time, -1)))
-            + self.encoders["body_rotmats"](x_t.body_rotmats.reshape((batch, time, -1)))
-            + self.encoders["contacts"](x_t.contacts)
+            self.encoders["mano_betas"](x_t.mano_betas.reshape((batch, time, -1)))
+            + self.encoders["mano_poses"](x_t.mano_poses.reshape((batch, time, -1)))
+            + self.encoders["global_orientation"](x_t.global_orientation)
+            + self.encoders["camera_pose"](x_t.camera_pose)
+            + self.encoders["mano_side"](x_t.mano_side)
         )
-        if self.config.include_hands:
-            assert x_t.hand_rotmats is not None
-            x_t_encoded = x_t_encoded + self.encoders["hand_rotmats"](
-                x_t.hand_rotmats.reshape((batch, time, -1))
-            )
         assert x_t_encoded.shape == (batch, time, config.d_latent)
 
         # Embed the diffusion noise level.
@@ -453,9 +337,7 @@ class HandDenoiser(nn.Module):
 
         # Prepare conditioning information.
         cond = config.make_cond(
-            T_cpf_tm1_cpf_t,
-            T_world_cpf=T_world_cpf,
-            hand_positions_wrt_cpf=hand_positions_wrt_cpf,
+            rel_palm_pose = rel_palm_pose
         )
 
         # Randomly drop out conditioning information; this serves as a
@@ -495,7 +377,7 @@ class HandDenoiser(nn.Module):
             num_tokens = time + 1
         else:
             num_tokens = time
-
+        # print("mask is",mask,"and mask type is",mask.shape,batch,time)
         # Compute attention mask. This needs to be a fl
         if mask is None:
             attn_mask = None
@@ -528,14 +410,9 @@ class HandDenoiser(nn.Module):
             [
                 # Project rotation matrices for body_rotmats via SVD,
                 (
-                    project_rotmats_via_svd(
-                        modality_decoder(decoder_out).reshape((-1, 3, 3))
-                    ).reshape(
-                        (batch, time, {"body_rotmats": 21, "hand_rotmats": 30}[key] * 9)
-                    )
+                    modality_decoder(decoder_out).reshape((batch,time,15 * 3))
                     # if enabled,
-                    if project_output_rotmats
-                    and key in ("body_rotmats", "hand_rotmats")
+                    if key in ("mano_poses")
                     # otherwise, just decode normally.
                     else modality_decoder(decoder_out)
                 )

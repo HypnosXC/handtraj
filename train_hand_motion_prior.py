@@ -14,18 +14,18 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import ProjectConfiguration
 from loguru import logger
 
-from egoallo import network, training_loss, training_utils
+from egoallo import hand_network, network, training_loss, training_utils
 from egoallo.data.amass import EgoAmassHdf5Dataset
 from egoallo.data.dataclass import collate_dataclass
 from egoallo.data.dex_ycb import DexYCBHdf5Dataset
 
 @dataclasses.dataclass(frozen=True)
-class EgoAlloTrainConfig:
+class HandTrainConfig:
     experiment_name: str
-    dataset_hdf5_path: Path
-    dataset_files_path: Path
+    # dataset_hdf5_path: Path
+    # dataset_files_path: Path
 
-    model: network.EgoDenoiserConfig = network.EgoDenoiserConfig()
+    model: hand_network.HandDenoiserConfig = hand_network.HandDenoiserConfig()
     loss: training_loss.TrainingLossConfig = training_loss.TrainingLossConfig()
 
     # Dataset arguments.
@@ -66,7 +66,7 @@ def get_experiment_dir(experiment_name: str, version: int = 0) -> Path:
 
 
 def run_training(
-    config: EgoAlloTrainConfig,
+    config: HandTrainConfig,
     restore_checkpoint_dir: Path | None = None,
 ) -> None:
     # Set up experiment directory + HF accelerate.
@@ -110,7 +110,7 @@ def run_training(
         logger.add(experiment_dir / "trainlog.log", rotation="100 MB")
 
     # Setup.
-    model = network.EgoDenoiser(config.model)
+    model = hand_network.HandDenoiser(config.model)
     train_loader = torch.utils.data.DataLoader(
         dataset=DexYCBHdf5Dataset(
             # config.dataset_hdf5_path,
@@ -171,7 +171,7 @@ def run_training(
             loop_metrics = next(loop_metrics_gen)
             step = loop_metrics.counter
 
-            loss, log_outputs = loss_helper.compute_denoising_loss(
+            loss, log_outputs = loss_helper.compute_hand_denoising_loss(
                 model,
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
