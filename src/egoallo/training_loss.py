@@ -77,12 +77,12 @@ class TrainingLossComputer:
         assert dim == 51
         x_0 = hand_network.HandDenoiseTraj(
             mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, time, 10)),
-            mano_poses=train_batch.mano_pose[:,:,:45].reshape(batch,time,15,3),
-            global_orientation=train_batch.mano_pose[:,:,45:48],
+            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,time,15,3),
+            global_orientation=train_batch.mano_pose[:,:,0:3],
             camera_pose=train_batch.mano_pose[:,:,48:],
             mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, time, -1)),
         )
-        rel_palm_pose = train_batch.mano_pose[:,:,42:45]
+        rel_palm_pose = train_batch.mano_pose[:,:,48:]
         x_0_packed = x_0.pack()
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, model.get_d_state())

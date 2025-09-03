@@ -312,7 +312,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 
 if __name__ == "__main__":
     # Example usage
-    dataset = DexYCBHdf5Dataset()
+    dataset = DexYCBHdf5Dataset(split="test")
     print(f"Dataset length: {len(dataset)}")
     sample = dataset[0]
     dataset.visualize_joints_in_rgb(0, out_dir="tmp")
