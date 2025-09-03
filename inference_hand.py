@@ -8,24 +8,21 @@ import numpy as np
 import torch
 import viser
 import yaml
+import random
+import os
 
-from egoallo import fncsmpl, fncsmpl_extensions
 from egoallo.data.aria_mps import load_point_cloud_and_find_ground
 from egoallo.guidance_optimizer_jax import GuidanceMode
 from egoallo.hand_detection_structs import (
     CorrespondedAriaHandWristPoseDetections,
     CorrespondedHamerDetections,
 )
-from egoallo.inference_utils import (
-    InferenceInputTransforms,
-    InferenceTrajectoryPaths,
-    load_denoiser,
-)
-from egoallo.sampling import run_sampling_with_stitching
-from egoallo.transforms import SE3, SO3
-from egoallo.vis_helpers import visualize_traj_and_hand_detections
+from egoallo.sampling import CosineNoiseScheduleConstants
+from egoallo.inference_utils import load_hand_denoiser
 from egoallo.data.dataclass import HandTrainingData
 from hamer.utils.mesh_renderer import create_raymond_lights
+from egoallo.data.dex_ycb import DexYCBHdf5Dataset
+from egoallo import network, hand_network
 # from PIL import Image
 import time    
 from manopth.manolayer import ManoLayer
@@ -33,7 +30,15 @@ import pyrender
 import trimesh
 import cv2
 from scipy.ndimage import binary_dilation
-mano_side_str=['left','right']
+from tqdm.auto import tqdm
+
+def quadratic_ts() -> np.ndarray:
+    """DDIM sampling schedule."""
+    end_step = 0
+    start_step = 1000
+    x = np.arange(end_step, int(np.sqrt(start_step))) ** 2
+    x[-1] = start_step
+    return x[::-1]
 
 def render_joint(
     vertices: np.ndarray,
@@ -82,45 +87,31 @@ def render_joint(
     mask = color[..., -1] > 0
     return color[..., :3], rend_depth, mask
 
-def get_vertices_faces(mano_side:torch.FloatTensor,
-                       mano_betas:torch.FloatTensor,
-                       mano_poses:torch.FloatTensor,
-                       global_orientation:torch.FloatTensor,
-                       camera_pose:torch.FloatTensor) -> tuple[torch.Tensor, torch.Tensor]:
-        mano_layer = ManoLayer(
-            flat_hand_mean=False,
-            ncomps=45,
-            side=mano_side_str[(int)(mano_side.numpy())],
-            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        )
-        vertices, joints = mano_layer(
-            torch.cat((global_orientation,mano_pose),dim=-1),
-            mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1),
-            camera_pose
-        )
-        vertices = vertices/ 1000  # Convert to meters
-        faces_m = mano_layer.th_faces
-        return vertices, faces_m
-
-def visualize_joints_in_rgb(mano_side:torch.FloatTensor,
-                            mano_betas:torch.FloatTensor,
-                            mano_poses:torch.FloatTensor,
-                            global_orientation:torch.FloatTensor,
-                            camera_pose:torch.FloatTensor,
+def visualize_joints_in_rgb(traj:HandDenoiseTraj,
                             intrinsics:torch.FloatTensor,
                             rgb_frames:torch.FloatTensor,
-                            out_dir:str = "tmp") -> None:
+                            out_dir:str = "tmp",
+                            fps=10, 
+                            resize=None) -> None:
     os.makedirs(out_dir, exist_ok=True)
-    vertices, faces = get_vertices_faces(mano_side,
-                                         mano_betas,
-                                         mano_poses,
-                                         global_orientation,
-                                         camera_pose)
-    intrinsics = intrinsics.numpy()
+    vertices, faces = traj.apply_to_hand()
+    vertices = vertices.cpu().numpy()
+    faces = faces.cpu().numpy()
+    intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
-    for i in range(self._subseq_len):
-        image = sample.rgb_frames[i].numpy().astype(np.uint8)
-        render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
+    subseq_len, height, width, _ = rgb_frames.shape
+    if resize is not None:
+        width, height = resize
+    else:
+        width = width * 2
+    # 确定视频编码器
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
+    
+    # 创建视频写入对象
+    out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
+    for i in range(subseq_len):
+        image = rgb_frames[i].numpy().astype(np.uint8)
+        render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
                                                             intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
         # breakpoint()
         border_width = 10
@@ -133,7 +124,11 @@ def visualize_joints_in_rgb(mano_side:torch.FloatTensor,
         )
         composited = np.where(render_mask[:, :, None], render_rgb, image)
         composited = np.concatenate([image, composited], axis=1)
-        iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+        if resize is not None:
+            composited = cv2.resize(composited, resize)
+        out.write(composited)
+    out.release()
+    print(f"visualization saved at : {out_dir}")
 
 def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTensor, mano_side: str) -> torch.FloatTensor:
     """Convert MANO pose to joint 3D positions."""
@@ -155,17 +150,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    traj_root: Path
-    """Search directory for hand trajectories. This should generally be laid out as something like:
-
-    traj_dir/
-        video.vrs
-        egoallo_outputs/
-            {date}_{start_index}-{end_index}.npz
-            ...
-        ...
-    """
-    checkpoint_dir: Path = Path("./experiments/first_try/v2/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_palm_pose/v5/checkpoints_30001/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
 
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""
@@ -192,136 +177,148 @@ class Args:
 def main(args: Args) -> None:
     device = torch.device("cuda")
 
-    traj_paths = InferenceTrajectoryPaths.find(args.traj_root)
-    if traj_paths.splat_path is not None:
-        print("Found splat at", traj_paths.splat_path)
-    else:
-        print("No scene splat found.")
-    # Get point cloud + floor.
-    points_data, floor_z = load_point_cloud_and_find_ground(traj_paths.points_path)
+    dataset = DexYCBHdf5Dataset(split="test")
+    denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
+    noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
+        device=device
+    )
+    alpha_bar_t = noise_constants.alpha_bar_t
+    alpha_t = noise_constants.alpha_t
+    num_samples = 1
+    train_batch = [] 
+    for i in range(num_samples):
+        data_id = random.randint(1,1000)
+        sample = dataset.__getitem__(data_id)
+        train_batch.append(sample)
+    keys = vars(train_batch[0]).keys()
+    train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
+    batch,seq_len,_ = train_batch.mano_pose.shape
+    train_batch.to(device)
 
-    # Read transforms from VRS / MPS, downsampled.
-    transforms = InferenceInputTransforms.load(
-        traj_paths.vrs_file, traj_paths.slam_root_dir, fps=30
-    ).to(device=device)
+    x_0_packed = hand_network.HandDenoiseTraj(
+        mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
+        mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
+        global_orientation=train_batch.mano_pose[:,:,0:3],
+        camera_pose=train_batch.mano_pose[:,:,48:],
+        mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
+    )
+    rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
 
-    # Note the off-by-one for Ts_world_cpf, which we need for relative transform computation.
-    Ts_world_cpf = (
-        SE3(
-            transforms.Ts_world_cpf[
-                args.start_index : args.start_index + args.traj_length + 1
+    x_t_packed = torch.randn((1, seq_len, denoiser_network.get_d_state()), device=device)
+    x_t_list = []
+    start_time = None
+
+    window_size = 64
+    overlap_size = 32
+    canonical_overlap_weights = (
+        torch.from_numpy(
+            np.minimum(
+                # Make this shape /```\
+                overlap_size,
+                np.minimum(
+                    # Make this shape: /
+                    np.arange(1, seq_len + 1),
+                    # Make this shape: \
+                    np.arange(1, seq_len + 1)[::-1],
+                ),
+            )
+            / overlap_size,
+        )
+        .to(device)
+        .to(torch.float32)
+    )
+    ts = quadratic_ts()
+
+    for i in tqdm(range(len(ts) - 1)):
+        print(f"Sampling {i}/{len(ts) - 1}")
+        t = ts[i]
+        t_next = ts[i + 1]
+
+        with torch.inference_mode():
+            # Chop everything into windows.
+            x_0_packed_pred = torch.zeros_like(x_t_packed)
+            overlap_weights = torch.zeros((1, seq_len, 1), device=x_t_packed.device)
+
+            # Denoise each window.
+            for start_t in range(0, seq_len, window_size - overlap_size):
+                end_t = min(start_t + window_size, seq_len)
+                assert end_t - start_t > 0
+                overlap_weights_slice = canonical_overlap_weights[
+                    None, : end_t - start_t, None
+                ]
+                overlap_weights[:, start_t:end_t, :] += overlap_weights_slice
+                x_0_packed_pred[:, start_t:end_t, :] += (
+                    denoiser_network.forward(
+                        x_t_packed[:, start_t:end_t, :],
+                        torch.tensor([t], device=device).expand((num_samples,)),
+                        rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
+                        project_output_rotmats=False,
+                        mask=None,
+                    )
+                    * overlap_weights_slice
+                )
+
+            # Take the mean for overlapping regions.
+            x_0_packed_pred /= overlap_weights
+
+            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred).pack()
+
+        if torch.any(torch.isnan(x_0_packed_pred)):
+            print("found nan", i)
+        sigma_t = torch.cat(
+            [
+                torch.zeros((1,), device=device),
+                torch.sqrt(
+                    (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+                )
+                * 0.8,
             ]
         )
-        @ SE3.from_rotation(
-            SO3.from_x_radians(
-                transforms.Ts_world_cpf.new_tensor(args.glasses_x_angle_offset)
+
+        """ if guidance_mode != "off" and guidance_inner:
+            x_0_pred, _ = do_guidance_optimization(
+                It's important that we _don't_ use the shifted transforms here.
+                Ts_world_cpf=Ts_world_cpf[1:, :],
+                traj=network.EgoDenoiseTraj.unpack(
+                    x_0_packed_pred, include_hands=denoiser_network.config.include_hands
+                ),
+                body_model=body_model,
+                guidance_mode=guidance_mode,
+                phase="inner",
+                
+                hamer_detections=hamer_detections,
+                aria_detections=aria_detections,
+                verbose=guidance_verbose,
             )
+            x_0_packed_pred = x_0_pred.pack()
+            del x_0_pred
+        """
+        if start_time is None:
+            start_time = time.time()
+
+        # print(sigma_t)
+        x_t_packed = (
+            torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
+            + (
+                torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
+                * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
+                / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+            )
+            + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
         )
-    ).parameters()
-    pose_timestamps_sec = transforms.pose_timesteps[
-        args.start_index + 1 : args.start_index + args.traj_length + 1
-    ]
-    Ts_world_device = transforms.Ts_world_device[
-        args.start_index + 1 : args.start_index + args.traj_length + 1
-    ]
-    del transforms
-
-    # Get temporally corresponded HaMeR detections.
-    if traj_paths.hamer_outputs is not None:
-        hamer_detections = CorrespondedHamerDetections.load(
-            traj_paths.hamer_outputs,
-            pose_timestamps_sec,
-        ).to(device)
-    else:
-        print("No hand detections found.")
-        hamer_detections = None
-
-    # Get temporally corresponded Aria wrist and palm estimates.
-    if traj_paths.wrist_and_palm_poses_csv is not None:
-        aria_detections = CorrespondedAriaHandWristPoseDetections.load(
-            traj_paths.wrist_and_palm_poses_csv,
-            pose_timestamps_sec,
-            Ts_world_device=Ts_world_device.numpy(force=True),
-        ).to(device)
-    else:
-        print("No Aria hand detections found.")
-        aria_detections = None
-
-    print(f"{Ts_world_cpf.shape=}")
-
-    server = None
-    if args.visualize_traj:
-        server = viser.ViserServer()
-        server.gui.configure_theme(dark_mode=True)
-
-    denoiser_network = load_denoiser(args.checkpoint_dir).to(device)
-    body_model = fncsmpl.SmplhModel.load(args.smplh_npz_path).to(device)
-
-    traj = run_sampling_with_stitching(
-        denoiser_network,
-        body_model=body_model,
-        guidance_mode=args.guidance_mode,
-        guidance_inner=args.guidance_inner,
-        guidance_post=args.guidance_post,
-        Ts_world_cpf=Ts_world_cpf,
-        hamer_detections=hamer_detections,
-        aria_detections=aria_detections,
-        num_samples=args.num_samples,
-        device=device,
-        floor_z=floor_z,
-    )
-
-    # Save outputs in case we want to visualize later.
-    if args.save_traj:
-        save_name = (
-            time.strftime("%Y%m%d-%H%M%S")
-            + f"_{args.start_index}-{args.start_index + args.traj_length}"
-        )
-        out_path = args.traj_root / "egoallo_outputs" / (save_name + ".npz")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        assert not out_path.exists()
-        (args.traj_root / "egoallo_outputs" / (save_name + "_args.yaml")).write_text(
-            yaml.dump(dataclasses.asdict(args))
+        x_t_list.append(
+            hand_network.HandDenoiseTraj.unpack(x_t_packed)
         )
 
-        posed = traj.apply_to_body(body_model)
-        Ts_world_root = fncsmpl_extensions.get_T_world_root_from_cpf_pose(
-            posed, Ts_world_cpf[..., 1:, :]
-        )
-        print(f"Saving to {out_path}...", end="")
-        np.savez(
-            out_path,
-            Ts_world_cpf=Ts_world_cpf[1:, :].numpy(force=True),
-            Ts_world_root=Ts_world_root.numpy(force=True),
-            body_quats=posed.local_quats[..., :21, :].numpy(force=True),
-            left_hand_quats=posed.local_quats[..., 21:36, :].numpy(force=True),
-            right_hand_quats=posed.local_quats[..., 36:51, :].numpy(force=True),
-            contacts=traj.contacts.numpy(force=True),  # Sometimes we forgot this...
-            betas=traj.betas.numpy(force=True),
-            frame_nums=np.arange(args.start_index, args.start_index + args.traj_length),
-            timestamps_ns=(np.array(pose_timestamps_sec) * 1e9).astype(np.int64),
-        )
-        print("saved!")
-
-    # Visualize.
-    if args.visualize_traj:
-        assert server is not None
-        loop_cb = visualize_traj_and_hand_detections(
-            server,
-            Ts_world_cpf[1:],
-            traj,
-            body_model,
-            hamer_detections,
-            aria_detections,
-            points_data=points_data,
-            splat_path=traj_paths.splat_path,
-            floor_z=floor_z,
-        )
-        while True:
-            loop_cb()
+        assert start_time is not None
+        print("RUNTIME (exclude first optimization)", time.time() - start_time)
+    traj = x_t_list[-1]
+    visualize_joints_in_rgb(traj=traj,
+                            intrinsics=train_batch.intrinsics.squeeze(0),
+                            rgb_frames=train_batch.rgb_frames.squeeze(0),
+                            out_dir = "tmp/visualize_hand")
 
 
 if __name__ == "__main__":
     import tyro
-
     main(tyro.cli(Args))

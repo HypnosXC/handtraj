@@ -148,18 +148,19 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 kwargs["mano_side"] = torch.ones(1)
             data_dir = dataset['data_dir'][index][0].decode('utf-8')
-            # firstly ignore the video data
-            '''
-            start_frame = dataset['start_frame'][index]
-            rgb_frames = []
-            for i in range(start_frame[0], start_frame[0] + self._subseq_len):
-                rgb_frame = self.rgb_format.format(i)
-                rgb_path = os.path.join(data_dir, rgb_frame)
-                # open the image and convert it to tensor
-                rgb_image = iio.imread(rgb_path)
-                rgb_frames.append(torch.from_numpy(rgb_image))
-            '''
-            kwargs["rgb_frames"] = torch.ones((timesteps,))  # torch.stack(rgb_frames)
+            # firstly ignore the video data in training 
+            if self.split == "test":
+                start_frame = dataset['start_frame'][index]
+                rgb_frames = []
+                for i in range(start_frame[0], start_frame[0] + self._subseq_len):
+                    rgb_frame = self.rgb_format.format(i)
+                    rgb_path = os.path.join(data_dir, rgb_frame)
+                    # open the image and convert it to tensor
+                    rgb_image = iio.imread(rgb_path)
+                    rgb_frames.append(torch.from_numpy(rgb_image))
+                kwargs["rgb_frames"] = torch.stack(rgb_frames)
+            else:
+                kwargs["rgb_frames"] = torch.ones((timesteps,))  # 
             kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     
@@ -287,7 +288,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
 
 if __name__ == "__main__":
     # Example usage
-    dataset = DexYCBHdf5Dataset()
+    dataset = DexYCBHdf5Dataset(split="test")
     print(f"Dataset length: {len(dataset)}")
     sample = dataset[0]
     dataset.visualize_joints_in_rgb(0, out_dir="tmp")

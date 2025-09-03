@@ -15,7 +15,7 @@ from torch import Tensor, nn
 from manopth.manolayer import ManoLayer
 from .tensor_dataclass import TensorDataclass
 from .transforms import SE3, SO3
-
+mano_side_str=['left','right']
 
 def project_rotmats_via_svd(
     rotmats: Float[Tensor, "*batch 3 3"],
@@ -49,17 +49,21 @@ class HandDenoiseTraj(TensorDataclass):
         packed_dim = 10 + 15 * 3 + 3 + 3 + 1
         return packed_dim
 
-    def apply_to_hand(self, mano_model: ManoLayer) -> tuple[torch.Tensor, torch.Tensor]:
+    def apply_to_hand(self,) -> tuple[torch.Tensor, torch.Tensor]:
+        mano_side = torch.sum(self.mano_side > 0.5 ) > self.mano_side.shape[1] / 2
+        # print(mano_side, self.mano_side.reshape(-1).cpu().numpy())
+        batch, time, _ , _ = self.mano_poses.shape
+        assert batch == 1 # actually we only can handle one video per process
         mano_layer = ManoLayer(
             flat_hand_mean=False,
             ncomps=45,
-            side=mano_side_str[(int)(self.mano_side.numpy())],
+            side=mano_side_str[(int)(mano_side.cpu().numpy())],
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        )
+        ).to(self.mano_poses.device)
         vertices, joints = mano_layer(
-            torch.cat((self.mano_poses,self.global_orientation),dim=-1),
-            self.mano_betas.unsqueeze(0).repeat(self.mano_poses.shape[0], 1),
-            self.camera_pose
+            torch.cat((self.mano_poses.reshape(batch,time,-1),self.global_orientation),dim=-1).squeeze(0),
+            self.mano_betas.squeeze(0),
+            self.camera_pose.squeeze(0)
         )
         vertices = vertices/ 1000  # Convert to meters
         faces_m = mano_layer.th_faces
