@@ -73,6 +73,11 @@ def run_training(
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
+    restore_checkpoint_dir = (Path(__file__).absolute().parent
+        / "experiments"
+        / config.experiment_name
+        / "v4"
+        / "checkpoints_30000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -170,7 +175,6 @@ def run_training(
         for train_batch in train_loader:
             loop_metrics = next(loop_metrics_gen)
             step = loop_metrics.counter
-
             loss, log_outputs = loss_helper.compute_hand_denoising_loss(
                 model,
                 unwrapped_model=accelerator.unwrap_model(model),

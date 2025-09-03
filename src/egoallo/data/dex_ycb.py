@@ -148,7 +148,8 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 kwargs["mano_side"] = torch.ones(1)
             data_dir = dataset['data_dir'][index][0].decode('utf-8')
-            # breakpoint()
+            # firstly ignore the video data
+            '''
             start_frame = dataset['start_frame'][index]
             rgb_frames = []
             for i in range(start_frame[0], start_frame[0] + self._subseq_len):
@@ -157,7 +158,8 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                 # open the image and convert it to tensor
                 rgb_image = iio.imread(rgb_path)
                 rgb_frames.append(torch.from_numpy(rgb_image))
-            kwargs["rgb_frames"] = torch.stack(rgb_frames)
+            '''
+            kwargs["rgb_frames"] = torch.ones((timesteps,))  # torch.stack(rgb_frames)
             kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     

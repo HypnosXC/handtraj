@@ -154,7 +154,8 @@ class HandDenoiserConfig:
 
         if self.cond_param == "ours":
             d_cond = 0
-            d_cond += 3 ## only palm position
+            d_cond += 3 ## root position
+            d_cond += 3 ## relative root movement
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":
@@ -183,7 +184,8 @@ class HandDenoiserConfig:
 
         # Construct device pose conditioning.
         if self.cond_param == "ours":
-            cond = rel_palm_pose
+            cond = torch.cat((torch.zeros((batch,1,3)).to(rel_palm_pose.device),rel_palm_pose[:,1:,] - rel_palm_pose[:,:-1,:]),dim = 1) # motion between t-1 -> t
+            cond = torch.cat((cond,rel_palm_pose),dim = -1)
         else:
             assert_never(self.cond_param)
         cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)
