@@ -19,7 +19,7 @@ htmlcov
 lightning_logs/
 outputs/
 
-data/
+/data/
 tmp/
 egoallo_checkpoint_*
 egoallo_example_*

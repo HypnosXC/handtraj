@@ -104,7 +104,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 
     def __init__(
         self,
-        hdf5_path: Path="/public/datasets/handdata/dexycb_s_all_unseen.hdf5",
+        hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5",
         split: Literal["train", "val", "test"] = "train",
         # file_list_path: Path,
         # splits: tuple[
@@ -127,18 +127,18 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             # ]
             dataset = hdf5_file[self.split]
             self._subseq_len = 64  # Default subsequence length, can be overridden.
-            self.N = dataset['data_dir'].shape[0]
+            self.N = dataset['mano_side'].shape[0]
             self.keys = list(dataset.keys())
         self.left_mano_layer = ManoLayer(
-            use_pca=False,
-            flat_hand_mean=False,
+            use_pca=True,
+            flat_hand_mean=True,
             ncomps=45,
             side='left',
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
         self.right_mano_layer = ManoLayer(
-            use_pca=False,
-            flat_hand_mean=False,
+            use_pca=True,
+            flat_hand_mean=True,
             ncomps=45,
             side='right',
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
@@ -170,7 +170,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             #     # open the image and convert it to tensor
             #     rgb_image = iio.imread(rgb_path)
             #     rgb_frames.append(torch.from_numpy(rgb_image))
-            kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'].astype(np.float32).transpose(0,2,3,1))
+            kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
             kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     
