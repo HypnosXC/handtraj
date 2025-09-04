@@ -130,14 +130,14 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             self.N = dataset['mano_side'].shape[0]
             self.keys = list(dataset.keys())
         self.left_mano_layer = ManoLayer(
-            use_pca=True,
+            use_pca=False,
             flat_hand_mean=True,
             ncomps=45,
             side='left',
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
         self.right_mano_layer = ManoLayer(
-            use_pca=True,
+            use_pca=False,
             flat_hand_mean=True,
             ncomps=45,
             side='right',
