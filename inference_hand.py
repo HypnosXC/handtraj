@@ -150,7 +150,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_palm_pose/v5/checkpoints_30001/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_palm_pose/v5/checkpoints_190000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
 
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""

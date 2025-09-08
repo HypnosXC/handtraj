@@ -73,11 +73,11 @@ def run_training(
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
-    restore_checkpoint_dir = (Path(__file__).absolute().parent
-        / "experiments"
-        / config.experiment_name
-        / "v4"
-        / "checkpoints_30000")
+    # restore_checkpoint_dir = (Path(__file__).absolute().parent
+    #     / "experiments"
+    #     / config.experiment_name
+    #     / "v4"
+    #     / "checkpoints_30000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),

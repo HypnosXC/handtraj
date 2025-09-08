@@ -116,6 +116,7 @@ class TrainingLossComputer:
             > self.config.cond_dropout_prob
             if self.config.cond_dropout_prob > 0.0
             else None,
+            conds = x_0_packed,
         )
         assert isinstance(x_0_packed_pred, torch.Tensor)
         x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred)

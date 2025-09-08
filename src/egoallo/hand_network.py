@@ -158,8 +158,8 @@ class HandDenoiserConfig:
 
         if self.cond_param == "ours":
             d_cond = 0
-            d_cond += 3 ## root position
-            d_cond += 3 ## relative root movement
+            d_cond += 0 ## root position
+            d_cond += 6 ## all info
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":
@@ -182,14 +182,19 @@ class HandDenoiserConfig:
     def make_cond(
         self,
         rel_palm_pose: Float[Tensor, "batch time 3"], # relative palm pose to the camera
+        conds: None,
     ) -> Float[Tensor, "batch time d_cond"]:
         """Construct conditioning information from CPF pose."""
         (batch, time, _) = rel_palm_pose.shape
 
         # Construct device pose conditioning.
         if self.cond_param == "ours":
-            cond = torch.cat((torch.zeros((batch,1,3)).to(rel_palm_pose.device),rel_palm_pose[:,1:,] - rel_palm_pose[:,:-1,:]),dim = 1) # motion between t-1 -> t
-            cond = torch.cat((cond,rel_palm_pose),dim = -1)
+            # 
+            if conds != None:
+                cond = conds
+            else:
+                cond = torch.cat((torch.zeros((batch,1,3)).to(rel_palm_pose.device),rel_palm_pose[:,1:,] - rel_palm_pose[:,:-1,:]),dim = 1) # motion between t-1 -> t
+                cond = torch.cat((cond,rel_palm_pose),dim = -1)
         else:
             assert_never(self.cond_param)
         cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)
@@ -317,6 +322,7 @@ class HandDenoiser(nn.Module):
         mask: Bool[Tensor, "batch time"] | None,
         # Mask for when to drop out / keep conditioning information.
         cond_dropout_keep_mask: Bool[Tensor, "batch"] | None = None,
+        conds: None,
     ) -> Float[Tensor, "batch time state_dim"]:
         """Predict a denoised trajectory. Note that `t` refers to a noise
         level, not a timestep."""
@@ -343,7 +349,8 @@ class HandDenoiser(nn.Module):
 
         # Prepare conditioning information.
         cond = config.make_cond(
-            rel_palm_pose = rel_palm_pose
+            rel_palm_pose = rel_palm_pose,
+            conds = conds
         )
 
         # Randomly drop out conditioning information; this serves as a
