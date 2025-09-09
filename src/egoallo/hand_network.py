@@ -159,7 +159,7 @@ class HandDenoiserConfig:
         if self.cond_param == "ours":
             d_cond = 0
             d_cond += 0 ## root position
-            d_cond += 6 ## all info
+            d_cond += 62 ## all info
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":

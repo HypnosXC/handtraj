@@ -135,11 +135,13 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     mano_betas = mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1)
     assert mano_pose.shape == (64, 51), f"Expected mano_pose shape (1, 51), got {mano_pose.shape}"
     assert mano_betas.shape == (64, 10), f"Expected mano_betas shape (1, 10), got {mano_betas.shape}"
-    mano_layer = ManoLayer(flat_hand_mean=False,
+    mano_layer = ManoLayer(
         ncomps=45,
         side=mano_side,
         mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        use_pca=True)
+         use_pca=False,
+            flat_hand_mean=True,)
+        
     verts, joints = mano_layer(
         mano_pose[:,:48],
         mano_betas,  # (64, 10)
@@ -150,7 +152,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_palm_pose/v5/checkpoints_190000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_all/v0/checkpoints_200000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
 
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""
@@ -253,6 +255,7 @@ def main(args: Args) -> None:
                         torch.tensor([t], device=device).expand((num_samples,)),
                         rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
                         project_output_rotmats=False,
+                        conds=x_0_packed.pack().to(x_t_packed.device)[:,start_t:end_t,:],
                         mask=None,
                     )
                     * overlap_weights_slice
@@ -313,7 +316,7 @@ def main(args: Args) -> None:
         assert start_time is not None
         print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
-    visualize_joints_in_rgb(traj=traj,
+    visualize_joints_in_rgb(traj=x_0_packed,
                             intrinsics=train_batch.intrinsics.squeeze(0),
                             rgb_frames=train_batch.rgb_frames.squeeze(0),
                             out_dir = "tmp/visualize_hand")

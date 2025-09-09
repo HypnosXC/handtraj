@@ -170,7 +170,11 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             #     # open the image and convert it to tensor
             #     rgb_image = iio.imread(rgb_path)
             #     rgb_frames.append(torch.from_numpy(rgb_image))
-            kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
+            
+            if self.split == 'test':
+                kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
+            else:
+                kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
             kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     
