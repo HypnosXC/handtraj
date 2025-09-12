@@ -55,13 +55,14 @@ class HandDenoiseTraj(TensorDataclass):
         batch, time, _ , _ = self.mano_poses.shape
         assert batch == 1 # actually we only can handle one video per process
         mano_layer = ManoLayer(
-            flat_hand_mean=False,
+            flat_hand_mean=True,
+            use_pca = False,
             ncomps=45,
             side=mano_side_str[(int)(mano_side.cpu().numpy())],
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         ).to(self.mano_poses.device)
         vertices, joints = mano_layer(
-            torch.cat((self.mano_poses.reshape(batch,time,-1),self.global_orientation),dim=-1).squeeze(0),
+            torch.cat((self.global_orientation,self.mano_poses.reshape(batch,time,-1)),dim=-1).squeeze(0),
             self.mano_betas.squeeze(0),
             self.camera_pose.squeeze(0)
         )
@@ -140,7 +141,7 @@ class HandDenoiserConfig:
     include_canonicalized_cpf_rotation_in_cond: bool = True
 
     cond_param: Literal[
-        "ours", "canonicalized", "absolute", "absrel", "absrel_global_deltas"
+        "ours", "wrist_pose", "wrist_motion","canonicalized", "absolute", "absrel", "absrel_global_deltas"
     ] = "ours"
     """Which conditioning parameterization to use.
 
@@ -156,10 +157,18 @@ class HandDenoiserConfig:
     def d_cond(self) -> int:
         """Dimensionality of conditioning vector."""
 
-        if self.cond_param == "ours":
+        if self.cond_param == "all":
             d_cond = 0
             d_cond += 0 ## root position
             d_cond += 62 ## all info
+        elif self.cond_param == "ours":
+            d_cond = 0
+            d_cond += 3 ## root position
+            d_cond += 3 ## root differential motion
+        elif self.cond_param == "wrist_motion":
+            d_cond = 0
+            d_cond += 0 ## root position
+            d_cond += 12 ## differential motion
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":
@@ -188,13 +197,22 @@ class HandDenoiserConfig:
         (batch, time, _) = rel_palm_pose.shape
 
         # Construct device pose conditioning.
-        if self.cond_param == "ours":
-            # 
-            if conds != None:
-                cond = conds
-            else:
-                cond = torch.cat((torch.zeros((batch,1,3)).to(rel_palm_pose.device),rel_palm_pose[:,1:,] - rel_palm_pose[:,:-1,:]),dim = 1) # motion between t-1 -> t
-                cond = torch.cat((cond,rel_palm_pose),dim = -1)
+        if self.cond_param == "all":
+            cond = conds
+        elif self.cond_param == "ours":
+            cond = conds[:,:,55:58]
+            diff_cond = torch.zeros_like(cond)
+            difs_cond[:,1:,:] = cond[:,1:,:]-cond[:,:-1,:]
+            cond = torch.cat((cond,diff_cond),dim=-1)
+        elif self.cond_param == "wrist_motion":
+            trans = conds[:,:,58:61]
+            orien = SO3.exp(conds[:,:,54:58])
+            wrist_motion = SE3.from_rotation_and_translation(rotation=orien,translation=trans)
+            # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
+            diff_motion = wrist_motion[:,:-1,:].inverse()@wrist_motion[:,1:,:]
+            cond = torch.cat((wrist_motion[:,0,:].as_matrix()[..., :3, :].reshape((batch, time, 12)),
+                              diff_motion.as_matrix()[..., :3, :].reshape((batch, time, 12))),
+                              dim=1)
         else:
             assert_never(self.cond_param)
         cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)

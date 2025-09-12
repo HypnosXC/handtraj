@@ -88,6 +88,7 @@ def render_joint(
     return color[..., :3], rend_depth, mask
 
 def visualize_joints_in_rgb(traj:HandDenoiseTraj,
+                            gt:HandDenoiseTraj,
                             intrinsics:torch.FloatTensor,
                             rgb_frames:torch.FloatTensor,
                             out_dir:str = "tmp",
@@ -95,15 +96,18 @@ def visualize_joints_in_rgb(traj:HandDenoiseTraj,
                             resize=None) -> None:
     os.makedirs(out_dir, exist_ok=True)
     vertices, faces = traj.apply_to_hand()
+    gt_vertices,gt_faces = gt.apply_to_hand()
     vertices = vertices.cpu().numpy()
     faces = faces.cpu().numpy()
+    gt_vertices = gt_vertices.cpu().numpy()
+    gt_faces = gt_faces.cpu().numpy()
     intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
     subseq_len, height, width, _ = rgb_frames.shape
     if resize is not None:
         width, height = resize
     else:
-        width = width * 2
+        width = width * 3
     # 确定视频编码器
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
     
@@ -113,17 +117,27 @@ def visualize_joints_in_rgb(traj:HandDenoiseTraj,
         image = rgb_frames[i].numpy().astype(np.uint8)
         render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
                                                             intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+        gt_render_rgb,gt_depth,gt_render_mask = render_joint(gt_vertices[i], gt_faces,
+                                                            intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
         # breakpoint()
         border_width = 10
-        composited = np.where(
+        composited_pred = np.where(
             binary_dilation(
                 render_mask, np.ones((border_width, border_width), dtype=bool)
             )[:, :, None],
             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
             image,
         )
-        composited = np.where(render_mask[:, :, None], render_rgb, image)
-        composited = np.concatenate([image, composited], axis=1)
+        composited_gt = np.where(
+            binary_dilation(
+                gt_render_mask, np.ones((border_width, border_width), dtype=bool)
+            )[:, :, None],
+            np.zeros_like(gt_render_rgb) + np.array(border_color, dtype=np.uint8),
+            image,
+        )
+        composited_pred = np.where(render_mask[:, :, None], render_rgb, image)
+        composited_gt = np.where(gt_render_mask[:, :, None], gt_render_rgb, image)
+        composited = np.concatenate([image, composited_gt,composited_pred], axis=1)
         if resize is not None:
             composited = cv2.resize(composited, resize)
         out.write(composited)
@@ -187,9 +201,11 @@ def main(args: Args) -> None:
     alpha_bar_t = noise_constants.alpha_bar_t
     alpha_t = noise_constants.alpha_t
     num_samples = 1
-    train_batch = [] 
+    train_batch = []
+    rand_id = 0 
     for i in range(num_samples):
         data_id = random.randint(1,1000)
+        rand_id = data_id
         sample = dataset.__getitem__(data_id)
         train_batch.append(sample)
     keys = vars(train_batch[0]).keys()
@@ -204,6 +220,7 @@ def main(args: Args) -> None:
         camera_pose=train_batch.mano_pose[:,:,48:],
         mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
     )
+    conds = x_0_packed.pack().to(device).clone()
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
 
     x_t_packed = torch.randn((1, seq_len, denoiser_network.get_d_state()), device=device)
@@ -255,7 +272,7 @@ def main(args: Args) -> None:
                         torch.tensor([t], device=device).expand((num_samples,)),
                         rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
                         project_output_rotmats=False,
-                        conds=x_0_packed.pack().to(x_t_packed.device)[:,start_t:end_t,:],
+                        conds=conds[:,start_t:end_t,:],
                         mask=None,
                     )
                     * overlap_weights_slice
@@ -316,7 +333,9 @@ def main(args: Args) -> None:
         assert start_time is not None
         print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
-    visualize_joints_in_rgb(traj=x_0_packed,
+    print("take the id",rand_id,"as the test sample")
+    visualize_joints_in_rgb(traj=traj,
+                            gt=x_0_packed,
                             intrinsics=train_batch.intrinsics.squeeze(0),
                             rgb_frames=train_batch.rgb_frames.squeeze(0),
                             out_dir = "tmp/visualize_hand")

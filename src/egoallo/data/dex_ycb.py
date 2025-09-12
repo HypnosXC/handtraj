@@ -259,6 +259,8 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         sample = self.__getitem__(index)
         intrinsics = sample.intrinsics.numpy()
         border_color = [255, 0, 0]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
+        out = cv2.VideoWriter(out_dir+"/gt.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
         for i in range(self._subseq_len):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
             # render_rgb, render_depth, render_mask = render_joint(
@@ -283,7 +285,9 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             )
             composited = np.where(render_mask[:, :, None], render_rgb, image)
             composited = np.concatenate([image, composited], axis=1)
-            iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+            out.write(composited)
+        out.release()
 
 # def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTensor, mano_side: str, extrinsics: torch.FloatTensor, intrinsics: torch.FloatTensor) -> torch.FloatTensor:
 #     """Convert MANO pose to joint 3D positions."""
@@ -318,8 +322,8 @@ if __name__ == "__main__":
     # Example usage
     dataset = DexYCBHdf5Dataset(split="test")
     print(f"Dataset length: {len(dataset)}")
-    sample = dataset[0]
-    dataset.visualize_joints_in_rgb(0, out_dir="tmp")
+    sample = dataset[860]
+    dataset.visualize_joints_in_rgb(90, out_dir="tmp")
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
