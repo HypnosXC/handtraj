@@ -414,6 +414,7 @@ class HamerHelper:
                 "mano_hand_betas": mano_hand_betas[is_right],
                 "mano_hand_global_orient": R_camera_hand[is_right],
                 "faces": self.get_mano_faces("right"),
+                "global_translation": pred_cam_t[is_right, None, :],
             }
 
         detections_left_wrt_cam: HandOutputsWrtCamera | None
@@ -439,6 +440,7 @@ class HamerHelper:
                 "mano_hand_betas": mano_hand_betas[is_left],
                 "mano_hand_global_orient": flip_rotmats(R_camera_hand[is_left]),
                 "faces": self.get_mano_faces("left"),
+                "global_translation": pred_cam_t[is_left, None, :],
             }
         # end new brent stuff
         return detections_left_wrt_cam, detections_right_wrt_cam
@@ -521,7 +523,6 @@ class HamerHelper:
         h, w = image.shape[:2]
 
         for index in range(detections["verts"].shape[0]):
-            print(index)
             render_rgb, _, render_mask = self.render_detection(
                 detections, hand_index=index, h=h, w=w, focal_length=focal_length
             )

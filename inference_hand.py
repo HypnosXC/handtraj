@@ -10,8 +10,9 @@ import viser
 import yaml
 import random
 import os
-
+#from egoallo.transforms import SE3, SO3
 from egoallo.data.aria_mps import load_point_cloud_and_find_ground
+from egoallo.data.dataclass import collate_dataclass
 from egoallo.guidance_optimizer_jax import GuidanceMode
 from egoallo.hand_detection_structs import (
     CorrespondedAriaHandWristPoseDetections,
@@ -166,7 +167,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_all/v0/checkpoints_200000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v0/checkpoints_400000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
 
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""
@@ -189,30 +190,20 @@ class Args:
     visualize_traj: bool = False
     """Whether to visualize the trajectory after sampling."""
 
-
-def main(args: Args) -> None:
-    device = torch.device("cuda")
-
-    dataset = DexYCBHdf5Dataset(split="test")
-    denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
+def inference_and_visualize(
+        denoiser_network,
+        train_batch,
+        device,
+        visualized=True):
     noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
-        device=device
+        device=device,
     )
     alpha_bar_t = noise_constants.alpha_bar_t
     alpha_t = noise_constants.alpha_t
-    num_samples = 1
-    train_batch = []
-    rand_id = 0 
-    for i in range(num_samples):
-        data_id = random.randint(1,1000)
-        rand_id = data_id
-        sample = dataset.__getitem__(data_id)
-        train_batch.append(sample)
-    keys = vars(train_batch[0]).keys()
-    train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
+    print(train_batch.mano_pose.shape)
     batch,seq_len,_ = train_batch.mano_pose.shape
     train_batch.to(device)
-
+    print(denoiser_network)
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
         mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
@@ -223,7 +214,7 @@ def main(args: Args) -> None:
     conds = x_0_packed.pack().to(device).clone()
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
 
-    x_t_packed = torch.randn((1, seq_len, denoiser_network.get_d_state()), device=device)
+    x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
 
@@ -256,7 +247,7 @@ def main(args: Args) -> None:
         with torch.inference_mode():
             # Chop everything into windows.
             x_0_packed_pred = torch.zeros_like(x_t_packed)
-            overlap_weights = torch.zeros((1, seq_len, 1), device=x_t_packed.device)
+            overlap_weights = torch.zeros((batch, seq_len, 1), device=x_t_packed.device)
 
             # Denoise each window.
             for start_t in range(0, seq_len, window_size - overlap_size):
@@ -269,7 +260,7 @@ def main(args: Args) -> None:
                 x_0_packed_pred[:, start_t:end_t, :] += (
                     denoiser_network.forward(
                         x_t_packed[:, start_t:end_t, :],
-                        torch.tensor([t], device=device).expand((num_samples,)),
+                        torch.tensor([t], device=device).expand((batch,)),
                         rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
                         project_output_rotmats=False,
                         conds=conds[:,start_t:end_t,:],
@@ -333,14 +324,110 @@ def main(args: Args) -> None:
         assert start_time is not None
         print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
-    print("take the id",rand_id,"as the test sample")
-    visualize_joints_in_rgb(traj=traj,
-                            gt=x_0_packed,
-                            intrinsics=train_batch.intrinsics.squeeze(0),
-                            rgb_frames=train_batch.rgb_frames.squeeze(0),
-                            out_dir = "tmp/visualize_hand")
+    if visualized == True:
+        visualize_joints_in_rgb(traj=traj,
+                                gt=x_0_packed,
+                                intrinsics=train_batch.intrinsics.squeeze(0),
+                                rgb_frames=train_batch.rgb_frames.squeeze(0),
+                                out_dir = "tmp/visualize_hand")
+        return traj
+    else:
+        return traj
 
 
+
+def main(args: Args) -> None:
+    device = torch.device("cuda")
+    dataset = DexYCBHdf5Dataset(split="test")
+    denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
+    train_batch = []
+    rand_id = 0 
+    visualized = False
+    test_hamer = True
+    if test_hamer == True:
+        N = len(dataset)
+        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"camera_pose":0}
+        for i in range(N):
+            hamer_out = dataset.hamer_output(i)
+            gt = [dataset.__getitem__(i).to(device)] 
+            keys = vars(gt[0]).keys()
+            gt = type(gt[0])(**{k: torch.stack([getattr(b, k) for b in gt]) for k in keys})
+            if gt.mano_side[0].cpu().numpy() != 0:
+                hamer_out = [x['right']for x in hamer_out]
+            else:
+                hamer_out = [x['left'] for x in hamer_out]
+            keys = hamer_out[0].keys()
+            hamer_out = type(hamer_out[0])(**{k: np.stack([b[k] for b in hamer_out],axis=0) for k in keys})
+            gt_values={}
+            gt_values["mano_poses"] = gt.mano_pose[:,:,3:48]
+            gt_values["mano_betas"] = gt.mano_betas
+            gt_values["global_orientation"] = gt.mano_pose[:,:,0:3]
+            gt_values["global_translation"] = gt.mano_pose[:,:,48:]
+            hamer_out["mano_poses"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["mano_poses"])).log().reshape(-1,45).numpy()
+            hamer_out["global_orientation"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["global_orientation"])).log().reshape(-1,3).numpy()
+            print(hamer_out["global_translation"].shape)
+            x_0_packed = hand_network.HandDenoiseTraj(
+                                                    mano_betas=gt.mano_betas.unsqueeze(1).expand((1, 64, 10)),
+                                                    mano_poses=gt.mano_pose[:,:,3:48].reshape(1,64,15,3),
+                                                    global_orientation=gt.mano_pose[:,:,0:3],
+                                                    camera_pose=gt.mano_pose[:,:,48:],
+                                                    mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
+                                                )
+            traj = hand_network.HandDenoiseTraj(
+                                                    mano_betas=torch.from_numpy(hamer_out["mano_betas"]).permute((1, 0, 2)),
+                                                    mano_poses=torch.from_numpy(hamer_out["mano_poses"]).reshape(1,64,15,3),
+                                                    global_orientation=torch.from_numpy(hamer_out['global_orientation']).unsqueeze(0),
+                                                    camera_pose=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
+                                                    mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
+                                                )
+            
+            for var in errors.keys():
+                errors[var]+=((getattr(x_0_packed,var).cpu()-getattr(traj,var))**2).sum().numpy()
+        for var in errors.keys():
+                print("var: ",var," MSE error is:",errors[var]/N)
+    else: 
+        if visualized == True:
+            num_samples = 1
+            for i in range(num_samples):
+                data_id = random.randint(1,1000)
+                rand_id = data_id
+                sample = dataset.__getitem__(data_id)
+                train_batch.append(sample)
+            keys = vars(train_batch[0]).keys()
+            train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
+            inference_and_visualize(denoiser_network,train_batch,device,visualized)
+            print("take the id",rand_id,"as the test sample")
+        else:
+            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"camera_pose":0}
+            total_size = 0
+            dataloader = torch.utils.data.DataLoader(dataset, 
+                                                    batch_size=64,
+                                                    shuffle=False,
+                                                    num_workers=2,
+                                                    pin_memory=True,
+                                                    collate_fn=collate_dataclass,
+                                                    drop_last=False)
+            for train_batch in dataloader:
+                total_size += train_batch.mano_betas.shape[0]
+                pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
+                batch,seq_len,_ = train_batch.mano_pose.shape
+                x_0_packed = hand_network.HandDenoiseTraj(
+                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
+                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
+                                                            global_orientation=train_batch.mano_pose[:,:,0:3],
+                                                            camera_pose=train_batch.mano_pose[:,:,48:],
+                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
+                                                        )
+                for var in errors.keys():
+                    errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+            for var in errors.keys():
+                print("var: ",var," MSE error is:",errors[var]/total_size)
+            
+
+
+    
+    
+    
 if __name__ == "__main__":
     import tyro
     main(tyro.cli(Args))

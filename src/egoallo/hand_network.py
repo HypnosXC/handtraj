@@ -141,7 +141,7 @@ class HandDenoiserConfig:
     include_canonicalized_cpf_rotation_in_cond: bool = True
 
     cond_param: Literal[
-        "ours", "wrist_pose", "wrist_motion","canonicalized", "absolute", "absrel", "absrel_global_deltas"
+        "ours", "all", "wrist_motion","canonicalized", "absolute", "absrel", "absrel_global_deltas"
     ] = "ours"
     """Which conditioning parameterization to use.
 
@@ -200,18 +200,20 @@ class HandDenoiserConfig:
         if self.cond_param == "all":
             cond = conds
         elif self.cond_param == "ours":
-            cond = conds[:,:,55:58]
+            cond = rel_palm_pose
             diff_cond = torch.zeros_like(cond)
-            difs_cond[:,1:,:] = cond[:,1:,:]-cond[:,:-1,:]
+            diff_cond[:,1:,:] = cond[:,1:,:]-cond[:,:-1,:]
             cond = torch.cat((cond,diff_cond),dim=-1)
         elif self.cond_param == "wrist_motion":
             trans = conds[:,:,58:61]
-            orien = SO3.exp(conds[:,:,54:58])
-            wrist_motion = SE3.from_rotation_and_translation(rotation=orien,translation=trans)
+            prior_orien = SO3.exp(conds[:,:-1,55:58])
+            cur_orien = SO3.exp(conds[:,1:,55:58])
+            prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
+            cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
             # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
-            diff_motion = wrist_motion[:,:-1,:].inverse()@wrist_motion[:,1:,:]
-            cond = torch.cat((wrist_motion[:,0,:].as_matrix()[..., :3, :].reshape((batch, time, 12)),
-                              diff_motion.as_matrix()[..., :3, :].reshape((batch, time, 12))),
+            diff_motion = prior_motion.inverse() @ cur_motion 
+            cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
+                              diff_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))),
                               dim=1)
         else:
             assert_never(self.cond_param)

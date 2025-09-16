@@ -202,9 +202,10 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                 hamer_out_frame["left"] = {
                     "verts": hamer_out_left["verts"],
                     "keypoints_3d": hamer_out_left["keypoints_3d"],
-                    "mano_hand_pose": hamer_out_left["mano_hand_pose"],
-                    "mano_hand_betas": hamer_out_left["mano_hand_betas"],
-                    "mano_hand_global_orient": hamer_out_left["mano_hand_global_orient"],
+                    "mano_poses": hamer_out_left["mano_hand_pose"],
+                    "mano_betas": hamer_out_left["mano_hand_betas"],
+                    "global_orientation": hamer_out_left["mano_hand_global_orient"],
+                    "global_translation": hamer_out_left["global_translation"],
                 }
 
             if hamer_out_right is None:
@@ -213,9 +214,10 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                 hamer_out_frame["right"] = {
                     "verts": hamer_out_right["verts"],
                     "keypoints_3d": hamer_out_right["keypoints_3d"],
-                    "mano_hand_pose": hamer_out_right["mano_hand_pose"],
-                    "mano_hand_betas": hamer_out_right["mano_hand_betas"],
-                    "mano_hand_global_orient": hamer_out_right["mano_hand_global_orient"],
+                    "mano_poses": hamer_out_right["mano_hand_pose"],
+                    "mano_betas": hamer_out_right["mano_hand_betas"],
+                    "global_orientation": hamer_out_right["mano_hand_global_orient"],
+                    "global_translation": hamer_out_right["global_translation"],
                 }
 
             hamer_output_seq.append(hamer_out_frame)        
