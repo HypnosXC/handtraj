@@ -96,11 +96,11 @@ def visualize_joints_in_rgb(traj:HandDenoiseTraj,
                             fps=10, 
                             resize=None) -> None:
     os.makedirs(out_dir, exist_ok=True)
-    vertices, faces = traj.apply_to_hand()
-    gt_vertices,gt_faces = gt.apply_to_hand()
-    vertices = vertices.cpu().numpy()
+    vertices, faces,_ = traj.apply_to_hand()
+    gt_vertices,gt_faces,_ = gt.apply_to_hand()
+    vertices = vertices.squeeze(0).cpu().numpy()
     faces = faces.cpu().numpy()
-    gt_vertices = gt_vertices.cpu().numpy()
+    gt_vertices = gt_vertices.squeeze(0).cpu().numpy()
     gt_faces = gt_faces.cpu().numpy()
     intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
@@ -167,8 +167,9 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v0/checkpoints_400000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
-
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v1/checkpoints_100000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    visualize: bool = False
+    Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
     """Rotate the CPF poses by some X angle."""
     start_index: int = 0
@@ -200,7 +201,6 @@ def inference_and_visualize(
     )
     alpha_bar_t = noise_constants.alpha_bar_t
     alpha_t = noise_constants.alpha_t
-    print(train_batch.mano_pose.shape)
     batch,seq_len,_ = train_batch.mano_pose.shape
     train_batch.to(device)
     print(denoiser_network)
@@ -211,7 +211,6 @@ def inference_and_visualize(
         camera_pose=train_batch.mano_pose[:,:,48:],
         mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
     )
-    conds = x_0_packed.pack().to(device).clone()
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
 
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
@@ -257,13 +256,20 @@ def inference_and_visualize(
                     None, : end_t - start_t, None
                 ]
                 overlap_weights[:, start_t:end_t, :] += overlap_weights_slice
+                conds = hand_network.HandDenoiseTraj(
+                                                    mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
+                                                    mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
+                                                    global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
+                                                    camera_pose=x_0_packed.camera_pose[:, start_t:end_t, :],
+                                                    mano_side=x_0_packed.mano_side,
+                                                    ).to(device)
                 x_0_packed_pred[:, start_t:end_t, :] += (
                     denoiser_network.forward(
                         x_t_packed[:, start_t:end_t, :],
                         torch.tensor([t], device=device).expand((batch,)),
                         rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
                         project_output_rotmats=False,
-                        conds=conds[:,start_t:end_t,:],
+                        conds=conds,
                         mask=None,
                     )
                     * overlap_weights_slice
@@ -342,11 +348,12 @@ def main(args: Args) -> None:
     denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
     train_batch = []
     rand_id = 0 
-    visualized = False
-    test_hamer = True
+    visualized = args.visualize
+    test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
         errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"camera_pose":0}
+        joint_errors = 0
         for i in range(N):
             hamer_out = dataset.hamer_output(i)
             gt = [dataset.__getitem__(i).to(device)] 
@@ -356,6 +363,13 @@ def main(args: Args) -> None:
                 hamer_out = [x['right']for x in hamer_out]
             else:
                 hamer_out = [x['left'] for x in hamer_out]
+            skip_cam = False
+            for j in range(len(hamer_out)):
+                if hamer_out[j]==None:
+                    skip_cam = True
+                    print("Encounter None hand at index", i ,",frame ", j, ", with gt as",gt.mano_joint_3d[:,j,:,:],gt.mano_pose[:,j,:])
+            if skip_cam == True:
+                continue
             keys = hamer_out[0].keys()
             hamer_out = type(hamer_out[0])(**{k: np.stack([b[k] for b in hamer_out],axis=0) for k in keys})
             gt_values={}
@@ -363,8 +377,10 @@ def main(args: Args) -> None:
             gt_values["mano_betas"] = gt.mano_betas
             gt_values["global_orientation"] = gt.mano_pose[:,:,0:3]
             gt_values["global_translation"] = gt.mano_pose[:,:,48:]
+            gt_values["joint_3d"] = gt.mano_joint_3d
             hamer_out["mano_poses"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["mano_poses"])).log().reshape(-1,45).numpy()
             hamer_out["global_orientation"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["global_orientation"])).log().reshape(-1,3).numpy()
+            hamer_out["keypoints_3d"] = torch.from_numpy(hamer_out["keypoints_3d"]).to(device).permute(1,0,2,3)
             print(hamer_out["global_translation"].shape)
             x_0_packed = hand_network.HandDenoiseTraj(
                                                     mano_betas=gt.mano_betas.unsqueeze(1).expand((1, 64, 10)),
@@ -380,11 +396,16 @@ def main(args: Args) -> None:
                                                     camera_pose=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
                                                     mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
                                                 )
-            
+            print("joint shape",(gt_values["joint_3d"]-hamer_out["keypoints_3d"]).shape)
+            joint_errors+= torch.sqrt(((gt_values["joint_3d"]-hamer_out["keypoints_3d"]) ** 2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
             for var in errors.keys():
                 errors[var]+=((getattr(x_0_packed,var).cpu()-getattr(traj,var))**2).sum().numpy()
+            for var in errors.keys():
+                print("var: ",var," MSE error is:",errors[var]/(i+1))
+            print("3D Joint mean error per video: ",joint_errors/(i+1))
         for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/N)
+        print("3D Joint mean error per video: ",joint_errors/N)
     else: 
         if visualized == True:
             num_samples = 1
@@ -398,7 +419,7 @@ def main(args: Args) -> None:
             inference_and_visualize(denoiser_network,train_batch,device,visualized)
             print("take the id",rand_id,"as the test sample")
         else:
-            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"camera_pose":0}
+            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"camera_pose":0,"3D_joints":0}
             total_size = 0
             dataloader = torch.utils.data.DataLoader(dataset, 
                                                     batch_size=64,
@@ -418,8 +439,12 @@ def main(args: Args) -> None:
                                                             camera_pose=train_batch.mano_pose[:,:,48:],
                                                             mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
                                                         )
+                _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
-                    errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+                    if var != "3D_joints":
+                        errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+                    else:#MJPE
+                        errors[var]+= torch.sqrt((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1).mean(dim=-1).sum().cpu().numpy()
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
             

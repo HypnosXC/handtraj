@@ -50,25 +50,49 @@ class HandDenoiseTraj(TensorDataclass):
         return packed_dim
 
     def apply_to_hand(self,) -> tuple[torch.Tensor, torch.Tensor]:
-        mano_side = torch.sum(self.mano_side > 0.5 ) > self.mano_side.shape[1] / 2
+        mano_side = (torch.sum(self.mano_side > 0.5,dim = 1) > self.mano_side.shape[1] / 2).squeeze(-1).cpu().numpy()
         # print(mano_side, self.mano_side.reshape(-1).cpu().numpy())
         batch, time, _ , _ = self.mano_poses.shape
-        assert batch == 1 # actually we only can handle one video per process
-        mano_layer = ManoLayer(
-            flat_hand_mean=True,
-            use_pca = False,
-            ncomps=45,
-            side=mano_side_str[(int)(mano_side.cpu().numpy())],
-            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        ).to(self.mano_poses.device)
-        vertices, joints = mano_layer(
-            torch.cat((self.global_orientation,self.mano_poses.reshape(batch,time,-1)),dim=-1).squeeze(0),
-            self.mano_betas.squeeze(0),
-            self.camera_pose.squeeze(0)
-        )
+        #assert batch == 1 # actually we only can handle one video per process
+        left_mano_layer = ManoLayer(
+                            flat_hand_mean=True,
+                            use_pca = False,
+                            ncomps=45,
+                            side="left",
+                            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+                        ).to(self.mano_poses.device)
+        right_mano_layer = ManoLayer(
+                            flat_hand_mean=True,
+                            use_pca = False,
+                            ncomps=45,
+                            side="right",
+                            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+                        ).to(self.mano_poses.device)
+        vertices=[]
+        joints=[]
+        for i in range(batch):
+            if mano_side[i]==True:
+                vert, jt = right_mano_layer(
+                    torch.cat((self.global_orientation[i,:,:],self.mano_poses[i,:,:].reshape(time,-1)),dim=-1),
+                    self.mano_betas[i,:,:],
+                    self.camera_pose[i,:,:]
+                )
+            else:
+                vert, jt = left_mano_layer(
+                    torch.cat((self.global_orientation[i,:,:],self.mano_poses[i,:,:].reshape(time,-1)),dim=-1),
+                    self.mano_betas[i,:,:],
+                    self.camera_pose[i,:,:]
+                )
+            vertices.append(vert)
+            joints.append(jt)
+        vertices=torch.stack(vertices,dim=0)
+        joints=torch.stack(joints,dim=0)
         vertices = vertices/ 1000  # Convert to meters
-        faces_m = mano_layer.th_faces
-        return vertices, faces_m
+        if mano_side[0] == True:
+            faces_m = right_mano_layer.th_faces
+        else:
+            faces_m = left_mano_layer.th_faces
+        return vertices, faces_m, joints
 
     def pack(self) -> Float[Tensor, "*#batch timesteps d_state"]:
         """Pack trajectory into a single flattened vector."""
@@ -142,7 +166,7 @@ class HandDenoiserConfig:
 
     cond_param: Literal[
         "ours", "all", "wrist_motion","canonicalized", "absolute", "absrel", "absrel_global_deltas"
-    ] = "ours"
+    ] = "wrist_motion"
     """Which conditioning parameterization to use.
 
     "ours" is the default, we try to be clever and design something with nice
@@ -191,23 +215,23 @@ class HandDenoiserConfig:
     def make_cond(
         self,
         rel_palm_pose: Float[Tensor, "batch time 3"], # relative palm pose to the camera
-        conds: None,
+        conds: HandDenoiseTraj,
     ) -> Float[Tensor, "batch time d_cond"]:
         """Construct conditioning information from CPF pose."""
         (batch, time, _) = rel_palm_pose.shape
 
         # Construct device pose conditioning.
         if self.cond_param == "all":
-            cond = conds
+            cond = conds.pack()
         elif self.cond_param == "ours":
             cond = rel_palm_pose
             diff_cond = torch.zeros_like(cond)
             diff_cond[:,1:,:] = cond[:,1:,:]-cond[:,:-1,:]
             cond = torch.cat((cond,diff_cond),dim=-1)
         elif self.cond_param == "wrist_motion":
-            trans = conds[:,:,58:61]
-            prior_orien = SO3.exp(conds[:,:-1,55:58])
-            cur_orien = SO3.exp(conds[:,1:,55:58])
+            trans = conds.camera_pose
+            prior_orien = SO3.exp(conds.global_orientation[:,:-1,:])
+            cur_orien = SO3.exp(conds.global_orientation[:,1:,:])
             prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
             cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
             # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
