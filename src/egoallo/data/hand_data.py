@@ -384,11 +384,14 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 #     # joint_3d = torch.bmm(R.unsqueeze(0).repeat(joints.shape[0], 1, 1), joints) + t.unsqueeze(0).repeat(joints.shape[0], 1, joints.shape[2])
 #     # return joint_3d.permute(0, 2, 1)  # (64, 21, 3)
 #     return joints
-    
+
+from torch.utils.data import ConcatDataset
 
 if __name__ == "__main__":
     # Example usage
-    dataset = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/interhand26m.hdf5")
+    dataset_ih26 = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/interhand26m.hdf5")
+    dataset_dexycb = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/dexycb_v2.hdf5")
+    dataset = ConcatDataset([dataset_ih26, dataset_dexycb])
     print(f"Dataset length: {len(dataset)}")
     sample = dataset[860]
     breakpoint()
