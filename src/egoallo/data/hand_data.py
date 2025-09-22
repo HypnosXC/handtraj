@@ -10,6 +10,7 @@ import torch.utils
 import torch.utils.data
 import os
 import imageio.v3 as iio
+from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
@@ -90,7 +91,7 @@ def render_joint(
 
 #     return image
 
-class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
+class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
 
     Args:
@@ -120,7 +121,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         # random_variable_len_min: int = 16,
     ) -> None:
         self._hdf5_path = hdf5_path
-        self.rgb_format = "color_{:06d}.jpg"
+        # self.rgb_format = "color_{:06d}.jpg"
         self.split = split
 
         with h5py.File(self._hdf5_path, "r") as hdf5_file:
@@ -143,7 +144,7 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             side='right',
             mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         )
-
+        
     def __getitem__(self, index: int) -> HandTrainingData:
         kwargs: dict[str, Any] = {}
 
@@ -172,10 +173,26 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             #     rgb_frames.append(torch.from_numpy(rgb_image))
             
             if self.split == 'test':
-                kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
+                if 'rgb_frames' in dataset:
+                    kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
+                elif 'video_name' in dataset:
+                    video_name = dataset['video_name'][index][0].decode('utf-8')
+                    video_path = os.path.join("/public/datasets/handdata/interhand26m/data/picked_videos", self.split, video_name)
+                    reader = iio.imread(video_path)
+                    rgb_frames = []
+                    for frame in reader:
+                        rgb_frames.append(torch.from_numpy(frame))
+                    
+                    kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
+                else:
+                    raise ValueError("No rgb_frames or video_name in test dataset")
             else:
                 kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
-            kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
+            # if no mask in dataset, set mask to all ones
+            if 'mask' in dataset:
+                kwargs["mask"] = torch.from_numpy(dataset['mask'][index])
+            else:
+                kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
@@ -253,8 +270,55 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             print("Error: mano_side should be 'left' or 'right'")
             return None
-
+        
     def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
+        os.makedirs(out_dir, exist_ok=True)
+        # vertices = self.get_vertices_faces(index)
+        # faces = self.get_mano_faces()
+        sample = self.__getitem__(index)
+        intrinsics = sample.intrinsics.numpy()
+        border_color = [255, 0, 0]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
+        out = cv2.VideoWriter(out_dir+"/gt_joints.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
+        projected_joints = np.zeros((sample.mano_joint_3d.shape[0],sample.mano_joint_3d.shape[1], 2))
+        projected_joints[...,0] = intrinsics[0] * (sample.mano_joint_3d[...,0] / sample.mano_joint_3d[...,2]) + intrinsics[2]
+        projected_joints[...,1] = intrinsics[1] * (sample.mano_joint_3d[...,1] / sample.mano_joint_3d[...,2]) + intrinsics[3]
+        for i in tqdm(range(sample.mask.sum().item())):
+            image = sample.rgb_frames[i].numpy().astype(np.uint8)
+            # rgb to bgr for cv2
+            image = image[:,:,::-1]
+            # render_rgb, render_depth, render_mask = render_joint(
+            #     vertices[i].numpy(),
+            #     faces.numpy(),
+            #     intrinsics,
+            #     h=image.shape[0],
+            #     w=image.shape[1],
+            # )
+            # # Convert to uint8
+            # render_rgb = (render_rgb * 255).astype(np.uint8)
+            # render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
+            #                                                    intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
+            # # breakpoint()
+            # border_width = 10
+            # composited = np.where(
+            #     binary_dilation(
+            #         render_mask, np.ones((border_width, border_width), dtype=bool)
+            #     )[:, :, None],
+            #     np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+            #     image,
+            # )
+            # composited = np.where(render_mask[:, :, None], render_rgb, image)
+            composited = image.copy()
+                    # sample.mano_joint_3d # (batch, timesteps, 21, 3)
+                    # to(batch, timesteps, 21, 3)
+            for j in range(projected_joints.shape[1]):
+                cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, border_color, -1)
+            composited = np.concatenate([image, composited], axis=1)
+            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+            out.write(composited)
+        out.release()
+
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
         os.makedirs(out_dir, exist_ok=True)
         vertices = self.get_vertices_faces(index)
         faces = self.get_mano_faces()
@@ -263,8 +327,10 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         border_color = [255, 0, 0]
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
         out = cv2.VideoWriter(out_dir+"/gt.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
-        for i in range(self._subseq_len):
+        for i in range(sample.mask.sum().item()):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
+            # rgb to bgr for cv2
+            image = image[:,:,::-1]
             # render_rgb, render_depth, render_mask = render_joint(
             #     vertices[i].numpy(),
             #     faces.numpy(),
@@ -318,14 +384,18 @@ class DexYCBHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 #     # joint_3d = torch.bmm(R.unsqueeze(0).repeat(joints.shape[0], 1, 1), joints) + t.unsqueeze(0).repeat(joints.shape[0], 1, joints.shape[2])
 #     # return joint_3d.permute(0, 2, 1)  # (64, 21, 3)
 #     return joints
-    
+
+from torch.utils.data import ConcatDataset
 
 if __name__ == "__main__":
     # Example usage
-    dataset = DexYCBHdf5Dataset(split="test")
+    dataset_ih26 = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/interhand26m.hdf5")
+    dataset_dexycb = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/dexycb_v2.hdf5")
+    dataset = ConcatDataset([dataset_ih26, dataset_dexycb])
     print(f"Dataset length: {len(dataset)}")
     sample = dataset[860]
-    dataset.visualize_joints_in_rgb(90, out_dir="tmp")
+    breakpoint()
+    dataset.visualize_manos_in_rgb(90, out_dir="tmp")
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
