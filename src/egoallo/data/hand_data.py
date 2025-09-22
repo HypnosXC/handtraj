@@ -91,7 +91,8 @@ def render_joint(
 
 #     return image
 
-class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
+
+class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
 
     Args:
@@ -105,7 +106,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 
     def __init__(
         self,
-        hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5",
+        hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5", # 
         split: Literal["train", "val", "test"] = "train",
         # file_list_path: Path,
         # splits: tuple[
@@ -387,15 +388,30 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 
 from torch.utils.data import ConcatDataset
 
+class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
+    # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
+    # to a single dataset
+    def __init__(self,split: Literal["train", "val", "test"] = "train") -> None:
+        dataset_ih26 = HandHdf5EachDataset(split=split,hdf5_path="/public/datasets/handdata/interhand26m.hdf5")
+        dataset_dexycb = HandHdf5EachDataset(split=split,hdf5_path="/public/datasets/handdata/dexycb_v2.hdf5")
+        self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb])
+
+    def __getitem__(self, index: int) -> HandTrainingData:
+        return self.dataset[index]
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+    
+    
+    
+    
 if __name__ == "__main__":
     # Example usage
-    dataset_ih26 = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/interhand26m.hdf5")
-    dataset_dexycb = HandHdf5Dataset(split="test",hdf5_path="/public/datasets/handdata/dexycb_v2.hdf5")
-    dataset = ConcatDataset([dataset_ih26, dataset_dexycb])
+    dataset = HandHdf5Dataset(split='test')
     print(f"Dataset length: {len(dataset)}")
     sample = dataset[860]
     breakpoint()
-    dataset.visualize_manos_in_rgb(90, out_dir="tmp")
+    # dataset.visualize_manos_in_rgb(90, out_dir="tmp")
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
