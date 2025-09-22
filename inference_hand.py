@@ -167,7 +167,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v1/checkpoints_100000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v1/checkpoints_400000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -345,6 +345,7 @@ def inference_and_visualize(
 def main(args: Args) -> None:
     device = torch.device("cuda")
     dataset = DexYCBHdf5Dataset(split="test")
+    print("Dataset size:", len(dataset))
     denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
     train_batch = []
     rand_id = 0 
@@ -373,10 +374,6 @@ def main(args: Args) -> None:
             keys = hamer_out[0].keys()
             hamer_out = type(hamer_out[0])(**{k: np.stack([b[k] for b in hamer_out],axis=0) for k in keys})
             gt_values={}
-            gt_values["mano_poses"] = gt.mano_pose[:,:,3:48]
-            gt_values["mano_betas"] = gt.mano_betas
-            gt_values["global_orientation"] = gt.mano_pose[:,:,0:3]
-            gt_values["global_translation"] = gt.mano_pose[:,:,48:]
             gt_values["joint_3d"] = gt.mano_joint_3d
             hamer_out["mano_poses"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["mano_poses"])).log().reshape(-1,45).numpy()
             hamer_out["global_orientation"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["global_orientation"])).log().reshape(-1,3).numpy()
@@ -396,9 +393,9 @@ def main(args: Args) -> None:
                                                     camera_pose=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
                                                     mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
                                                 )
-            print("joint shape",(gt_values["joint_3d"]-hamer_out["keypoints_3d"]).shape)
             joint_errors+= torch.sqrt(((gt_values["joint_3d"]-hamer_out["keypoints_3d"]) ** 2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
             for var in errors.keys():
+                print(var,"gt shape",getattr(x_0_packed,var).shape," and pred shape:", getattr(traj,var).shape)
                 errors[var]+=((getattr(x_0_packed,var).cpu()-getattr(traj,var))**2).sum().numpy()
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/(i+1))

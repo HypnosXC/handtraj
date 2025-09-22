@@ -71,7 +71,7 @@ def main(
     body_model = fncsmpl.SmplhModel.load(smplh_npz_path).to(device)
 
     metrics = list[dict[str, np.ndarray]]()
-
+    errors={"betas":0,"body_rotmats":0}
     for i in range(len(dataset)):
         sequence = dataset[i].to(device)
 
@@ -89,7 +89,11 @@ def main(
             device=device,
             guidance_verbose=False,
         )
-
+        errors["betas"] += ((samples-sequence)**2).sum()
+        pred_body_rots = SO3.from_matrix(samples.body_rotmats).log()
+        gt_body_rots = SO3(sequence.body_quats).log()
+        print("gt body rot shape", gt_body_rots.shape)
+        errors["body_rotmats"] +=((gt_body_rots-pred_body_rots)**2).sum(dim=-1).mean(dim=-1).sum()
         assert samples.hand_rotmats is not None
         assert samples.betas.shape == (num_samples, subseq_len, 16)
         assert samples.body_rotmats.shape == (num_samples, subseq_len, 21, 3, 3)
@@ -162,6 +166,9 @@ def main(
         print("=" * 80)
         print("=" * 80)
         print("=" * 80)
+    for var in errors:
+        print(var," error is: ", errors[var]/len(dataset))
+        
 
 
 if __name__ == "__main__":
