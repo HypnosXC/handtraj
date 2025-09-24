@@ -185,7 +185,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             #     rgb_image = iio.imread(rgb_path)
             #     rgb_frames.append(torch.from_numpy(rgb_image))
             if 'mask' in dataset:
-                kwargs["mask"] = torch.from_numpy(dataset['mask'][index])
+                kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
                 # if kwargs["mask"]!=torch.ones((timesteps,), dtype=torch.bool):
             else:
                 kwargs["mask"] = torch.ones((timesteps,), dtype=torch.bool)
@@ -347,7 +347,10 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
         dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
         dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
-        self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
+        if split == "test":
+            self.dataset = dataset_dexycb
+        else:
+            self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         self.left_mano_layer = ManoLayer(
             use_pca=False,
             flat_hand_mean=True,

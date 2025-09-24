@@ -22,7 +22,7 @@ from egoallo.sampling import CosineNoiseScheduleConstants
 from egoallo.inference_utils import load_hand_denoiser
 from egoallo.data.dataclass import HandTrainingData
 from hamer.utils.mesh_renderer import create_raymond_lights
-from egoallo.data.dex_ycb import DexYCBHdf5Dataset
+from egoallo.data.hand_data import HandHdf5Dataset
 from egoallo import network, hand_network
 # from PIL import Image
 import time    
@@ -344,7 +344,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = DexYCBHdf5Dataset(split="test")
+    dataset = HandHdf5Dataset(split="test")
     print("Dataset size:", len(dataset))
     denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
     train_batch = []
@@ -400,6 +400,7 @@ def main(args: Args) -> None:
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/(i+1))
             print("3D Joint mean error per video: ",joint_errors/(i+1))
+        errors["mano_betas"]/=64
         for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/N)
         print("3D Joint mean error per video: ",joint_errors/N)
@@ -438,10 +439,14 @@ def main(args: Args) -> None:
                                                         )
                 _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
-                    if var != "3D_joints":
+                    if var  != "3D_joints" and var  !="mano_poses":
                         errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
                     else:#MJPE
-                        errors[var]+= torch.sqrt((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1).mean(dim=-1).sum().cpu().numpy()
+                        if var == "3D_joints":
+                            errors[var]+= torch.sqrt((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1).mean(dim=-1).sum().cpu().numpy()
+                        else:
+                            errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1).mean(dim=-1).sum().numpy()
+            errors["mano_betas"]/=64
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
             

@@ -17,7 +17,7 @@ from loguru import logger
 from egoallo import hand_network, network, training_loss, training_utils
 from egoallo.data.amass import EgoAmassHdf5Dataset
 from egoallo.data.dataclass import collate_dataclass
-from egoallo.data.dex_ycb import DexYCBHdf5Dataset
+from egoallo.data.hand_data import HandHdf5Dataset
 
 @dataclasses.dataclass(frozen=True)
 class HandTrainConfig:
@@ -117,7 +117,7 @@ def run_training(
     # Setup.
     model = hand_network.HandDenoiser(config.model)
     train_loader = torch.utils.data.DataLoader(
-        dataset=DexYCBHdf5Dataset(
+        dataset=HandHdf5Dataset(
             # config.dataset_hdf5_path,
             # config.dataset_files_path,
             # splits=config.train_splits,
