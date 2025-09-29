@@ -332,7 +332,7 @@ def inference_and_visualize(
         print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
     ## Assume we have gt global trans/orientation
-    traj.camera_pose = x_0_packed.camera_pose.to(device)
+    traj.global_translation = x_0_packed.global_translation.to(device)
     traj.global_orientation = x_0_packed.global_orientation.to(device)
     if visualized == True:
         visualize_joints_in_rgb(traj=traj,
@@ -350,30 +350,57 @@ def main(args: Args) -> None:
     device = torch.device("cuda")
     dataset = HandHdf5Dataset(split="test")
     print("Dataset size:", len(dataset))
-    denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
-    train_batch = []
-    rand_id = 0 
     visualized = args.visualize
     test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
-        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"camera_pose":0}
+        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"global_translation":0}
         joint_errors = 0
+        from hamer_helper import HamerHelper
+        hamer_helper = HamerHelper()        
         for i in range(N):
-            hamer_out = dataset.hamer_output(i)
-            gt = [dataset.__getitem__(i).to(device)] 
-            keys = vars(gt[0]).keys()
-            gt = type(gt[0])(**{k: torch.stack([getattr(b, k) for b in gt]) for k in keys})
-            if gt.mano_side[0].cpu().numpy() != 0:
-                hamer_out = [x['right']for x in hamer_out]
-            else:
-                hamer_out = [x['left'] for x in hamer_out]
-            skip_cam = False
-            for j in range(len(hamer_out)):
-                if hamer_out[j]==None:
-                    skip_cam = True
-                    print("Encounter None hand at index", i ,",frame ", j, ", with gt as",gt.mano_joint_3d[:,j,:,:],gt.mano_pose[:,j,:])
-            if skip_cam == True:
+            sample = [dataset.__getitem__(i).to(device)] 
+            keys = vars(sample[0]).keys()
+            gt = type(sample[0])(**{k: torch.stack([getattr(b, k) for b in sample]) for k in keys})
+            skip_cam = -1
+            subseq_len = gt.mano_pose.shape[1]
+            hamer_out = []
+            for j in range(subseq_len):
+                hamer_out_frame = {}            
+                hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
+                    sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),
+                    focal_length=sample[0].intrinsics[0].cpu().item(),
+                )
+                if gt.mano_side[0].cpu().numpy() != 0:
+                    if hamer_out_right is None:
+                        skip_cam = j
+                        break
+                    else:
+                        out_dict = {
+                                    "verts": hamer_out_right["verts"],
+                                    "keypoints_3d": hamer_out_right["keypoints_3d"],
+                                    "mano_poses": hamer_out_right["mano_hand_pose"],
+                                    "mano_betas": hamer_out_right["mano_hand_betas"],
+                                    "global_orientation": hamer_out_right["mano_hand_global_orient"],
+                                    "global_translation": hamer_out_right["global_translation"],
+                        }
+                        hamer_out.append(out_dict)
+                else:
+                    if hamer_out_left is None:
+                        skip_cam = j
+                        break
+                    else:
+                        out_dict = {
+                                    "verts": hamer_out_left["verts"],
+                                    "keypoints_3d": hamer_out_left["keypoints_3d"],
+                                    "mano_poses": hamer_out_left["mano_hand_pose"],
+                                    "mano_betas": hamer_out_left["mano_hand_betas"],
+                                    "global_orientation": hamer_out_left["mano_hand_global_orient"],
+                                    "global_translation": hamer_out_left["global_translation"],
+                        }
+                        hamer_out.append(out_dict)          
+            if skip_cam >=0:
+                print("Encounter None hamer output at pos ",j," and index : ",i)
                 continue
             keys = hamer_out[0].keys()
             hamer_out = type(hamer_out[0])(**{k: np.stack([b[k] for b in hamer_out],axis=0) for k in keys})
@@ -387,14 +414,14 @@ def main(args: Args) -> None:
                                                     mano_betas=gt.mano_betas.unsqueeze(1).expand((1, 64, 10)),
                                                     mano_poses=gt.mano_pose[:,:,3:48].reshape(1,64,15,3),
                                                     global_orientation=gt.mano_pose[:,:,0:3],
-                                                    camera_pose=gt.mano_pose[:,:,48:],
+                                                    global_translation=gt.mano_pose[:,:,48:],
                                                     mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
                                                 )
             traj = hand_network.HandDenoiseTraj(
                                                     mano_betas=torch.from_numpy(hamer_out["mano_betas"]).permute((1, 0, 2)),
                                                     mano_poses=torch.from_numpy(hamer_out["mano_poses"]).reshape(1,64,15,3),
                                                     global_orientation=torch.from_numpy(hamer_out['global_orientation']).unsqueeze(0),
-                                                    camera_pose=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
+                                                    global_translation=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
                                                     mano_side=gt.mano_side.unsqueeze(1).expand((1, 64, -1)),
                                                 )
             joint_errors+= torch.sqrt(((gt_values["joint_3d"]-hamer_out["keypoints_3d"]) ** 2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
@@ -408,6 +435,9 @@ def main(args: Args) -> None:
                 print("var: ",var," MSE error is:",errors[var]/N)
         print("3D Joint mean error per video: ",joint_errors/N)
     else: 
+        denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
+        train_batch = []
+        rand_id = 0 
         if visualized == True:
             num_samples = 1
             for i in range(num_samples):
@@ -420,7 +450,7 @@ def main(args: Args) -> None:
             inference_and_visualize(denoiser_network,train_batch,device,visualized)
             print("take the id",rand_id,"as the test sample")
         else:
-            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"camera_pose":0,"3D_joints":0}
+            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0}
             total_size = 0
             dataloader = torch.utils.data.DataLoader(dataset, 
                                                     batch_size=64,
@@ -437,7 +467,7 @@ def main(args: Args) -> None:
                                                             mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
                                                             mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
                                                             global_orientation=train_batch.mano_pose[:,:,0:3],
-                                                            camera_pose=train_batch.mano_pose[:,:,48:],
+                                                            global_translation=train_batch.mano_pose[:,:,48:],
                                                             mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
                                                         )
                 _,_,joints_pred = pred.apply_to_hand()

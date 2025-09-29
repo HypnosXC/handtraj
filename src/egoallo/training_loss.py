@@ -30,7 +30,7 @@ class TrainingLossConfig:
             "mano_betas": 0.1,
             "mano_poses": 1.0,
             "global_orientation": 1.0,
-            "camera_pose": 1.0,
+            "global_translation": 1.0,
             "mano_side": 1.0
         }.copy
     )
@@ -79,7 +79,7 @@ class TrainingLossComputer:
             mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, time, 10)),
             mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,time,15,3),
             global_orientation=train_batch.mano_pose[:,:,0:3],
-            camera_pose=train_batch.mano_pose[:,:,48:],
+            global_translation=train_batch.mano_pose[:,:,48:],
             mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, time, -1)),
         )
         rel_palm_pose = train_batch.mano_pose[:,:,48:]
@@ -164,7 +164,7 @@ class TrainingLossComputer:
                 ** 2,
             ),
             "global_orientation": weight_and_mask_loss((x_0_pred.global_orientation - x_0.global_orientation) ** 2),
-            "camera_pose": weight_and_mask_loss((x_0_pred.camera_pose - x_0.camera_pose) ** 2),
+            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
             "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
         }
 
