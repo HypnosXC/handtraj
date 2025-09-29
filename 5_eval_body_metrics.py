@@ -93,7 +93,7 @@ def main(
         pred_body_rots = SO3.from_matrix(samples.body_rotmats).log()
         gt_body_rots = SO3(sequence.body_quats).log()[1:,:]
         print("gt body rot shape", gt_body_rots.shape)
-        errors["body_rotmats"] +=((gt_body_rots-pred_body_rots)**2).sum(dim=-1).mean(dim=-1).sum()
+        errors["body_rotmats"] +=((gt_body_rots-pred_body_rots)**2).sum(dim=-1).mean()
         assert samples.hand_rotmats is not None
         assert samples.betas.shape == (num_samples, subseq_len, 16)
         assert samples.body_rotmats.shape == (num_samples, subseq_len, 21, 3, 3)

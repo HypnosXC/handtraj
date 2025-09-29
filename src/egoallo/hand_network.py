@@ -39,7 +39,7 @@ class HandDenoiseTraj(TensorDataclass):
     global_orientation: Float[Tensor, "*#batch timesteps 3"]
     """Global Orientation for hand."""
 
-    camera_pose: Float[Tensor, "*#batch timesteps 3"]
+    global_translation: Float[Tensor, "*#batch timesteps 3"]
     """Global Camera translation"""
 
     mano_side: Float[Tensor, "*#batch timesteps 1"]
@@ -75,18 +75,18 @@ class HandDenoiseTraj(TensorDataclass):
                 vert, jt = right_mano_layer(
                     torch.cat((self.global_orientation[i,:,:],self.mano_poses[i,:,:].reshape(time,-1)),dim=-1),
                     self.mano_betas[i,:,:],
-                    self.camera_pose[i,:,:]
+                    self.global_translation[i,:,:]
                 )
             else:
                 vert, jt = left_mano_layer(
                     torch.cat((self.global_orientation[i,:,:],self.mano_poses[i,:,:].reshape(time,-1)),dim=-1),
                     self.mano_betas[i,:,:],
-                    self.camera_pose[i,:,:]
+                    self.global_translation[i,:,:]
                 )
             vertices.append(vert)
             joints.append(jt)
         vertices=torch.stack(vertices,dim=0)
-        joints=torch.stack(joints,dim=0)
+        joints=torch.stack(joints,dim=0)/1000
         vertices = vertices/ 1000  # Convert to meters
         if mano_side[0] == True:
             faces_m = right_mano_layer.th_faces
@@ -122,7 +122,7 @@ class HandDenoiseTraj(TensorDataclass):
         (*batch, time, d_state) = x.shape
         assert d_state == cls.get_packed_dim()
 
-        mano_betas, mano_poses, global_orientation,camera_pose,mano_side = torch.split(
+        mano_betas, mano_poses, global_orientation,global_translation,mano_side = torch.split(
             x, [10, 15 * 3, 3, 3, 1], dim=-1
         )
         mano_poses = mano_poses.reshape((*batch, time, 15, 3))
@@ -137,7 +137,7 @@ class HandDenoiseTraj(TensorDataclass):
             mano_betas=mano_betas,
             mano_poses=mano_poses,
             global_orientation=global_orientation,
-            camera_pose=camera_pose,
+            global_translation=global_translation,
             mano_side=mano_side
         )
 
@@ -229,7 +229,7 @@ class HandDenoiserConfig:
             diff_cond[:,1:,:] = cond[:,1:,:]-cond[:,:-1,:]
             cond = torch.cat((cond,diff_cond),dim=-1)
         elif self.cond_param == "wrist_motion":
-            trans = conds.camera_pose
+            trans = conds.global_translation
             prior_orien = SO3.exp(conds.global_orientation[:,:-1,:])
             cur_orien = SO3.exp(conds.global_orientation[:,1:,:])
             prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
@@ -263,7 +263,7 @@ class HandDenoiser(nn.Module):
             "mano_betas": 10,
             "mano_poses": 15 * 3,
             "global_orientation": 3,
-            "camera_pose":3,
+            "global_translation":3,
             "mano_side":1
         }
 
@@ -381,7 +381,7 @@ class HandDenoiser(nn.Module):
             self.encoders["mano_betas"](x_t.mano_betas.reshape((batch, time, -1)))
             + self.encoders["mano_poses"](x_t.mano_poses.reshape((batch, time, -1)))
             + self.encoders["global_orientation"](x_t.global_orientation)
-            + self.encoders["camera_pose"](x_t.camera_pose)
+            + self.encoders["global_translation"](x_t.global_translation)
             + self.encoders["mano_side"](x_t.mano_side)
         )
         assert x_t_encoded.shape == (batch, time, config.d_latent)

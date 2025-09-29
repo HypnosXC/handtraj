@@ -114,6 +114,7 @@ def visualize_joints_in_rgb(traj:HandDenoiseTraj,
     
     # 创建视频写入对象
     out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
+    print("start making the video")
     for i in range(subseq_len):
         image = rgb_frames[i].numpy().astype(np.uint8)
         render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
@@ -208,7 +209,7 @@ def inference_and_visualize(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
         mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
         global_orientation=train_batch.mano_pose[:,:,0:3],
-        camera_pose=train_batch.mano_pose[:,:,48:],
+        global_translation=train_batch.mano_pose[:,:,48:],
         mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
     )
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
@@ -260,7 +261,7 @@ def inference_and_visualize(
                                                     mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
                                                     mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
                                                     global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
-                                                    camera_pose=x_0_packed.camera_pose[:, start_t:end_t, :],
+                                                    global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
                                                     mano_side=x_0_packed.mano_side,
                                                     ).to(device)
                 x_0_packed_pred[:, start_t:end_t, :] += (
@@ -330,6 +331,9 @@ def inference_and_visualize(
         assert start_time is not None
         print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
+    ## Assume we have gt global trans/orientation
+    traj.camera_pose = x_0_packed.camera_pose.to(device)
+    traj.global_orientation = x_0_packed.global_orientation.to(device)
     if visualized == True:
         visualize_joints_in_rgb(traj=traj,
                                 gt=x_0_packed,
@@ -400,7 +404,6 @@ def main(args: Args) -> None:
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/(i+1))
             print("3D Joint mean error per video: ",joint_errors/(i+1))
-        errors["mano_betas"]/=64
         for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/N)
         print("3D Joint mean error per video: ",joint_errors/N)
@@ -440,13 +443,12 @@ def main(args: Args) -> None:
                 _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
                     if var  != "3D_joints" and var  !="mano_poses":
-                        errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+                        errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).mean(dim=-1).mean(dim=-1).sum().numpy()
                     else:#MJPE
                         if var == "3D_joints":
-                            errors[var]+= torch.sqrt((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1).mean(dim=-1).sum().cpu().numpy()
+                            errors[var]+= torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
                         else:
-                            errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1).mean(dim=-1).sum().numpy()
-            errors["mano_betas"]/=64
+                            errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1).mean(dim=-1).mean(dim=-1).sum().numpy()
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
             
