@@ -136,7 +136,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             raise ValueError("dataset_name should be dexycb, interhand26m or arctic")
         # self.rgb_format = "color_{:06d}.jpg"
         self.split = split
-
+        self.dataset_name = dataset_name
         with h5py.File(self._hdf5_path, "r") as hdf5_file:
             # ]
             dataset = hdf5_file[self.split]
@@ -168,6 +168,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
             timesteps= kwargs["mano_pose"].shape[0]
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
+            if self.dataset_name=="arctic":
+                kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
             kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
             if dataset['mano_side'][index][0].decode('utf-8') == 'left':
@@ -238,7 +240,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     "mano_poses": hamer_out_left["mano_hand_pose"],
                     "mano_betas": hamer_out_left["mano_hand_betas"],
                     "global_orientation": hamer_out_left["mano_hand_global_orient"],
-                    "global_translation": hamer_out_left["global_translation"],
+                    "camera_pose": hamer_out_left["camera_pose"],
                 }
 
             if hamer_out_right is None:
@@ -250,7 +252,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     "mano_poses": hamer_out_right["mano_hand_pose"],
                     "mano_betas": hamer_out_right["mano_hand_betas"],
                     "global_orientation": hamer_out_right["mano_hand_global_orient"],
-                    "global_translation": hamer_out_right["global_translation"],
+                    "camera_pose": hamer_out_right["camera_pose"],
                 }
 
             hamer_output_seq.append(hamer_out_frame)        
@@ -344,12 +346,14 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
     # to a single dataset
     def __init__(self,split: Literal["train", "val", "test"] = "train") -> None:
-        dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
-        dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
-        dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
         if split == "test":
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
             self.dataset = dataset_dexycb
         else:
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
+            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
+        
             self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         self.left_mano_layer = ManoLayer(
             use_pca=False,
