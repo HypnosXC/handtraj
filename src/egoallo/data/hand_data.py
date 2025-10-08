@@ -344,12 +344,14 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
     # to a single dataset
     def __init__(self,split: Literal["train", "val", "test"] = "train") -> None:
-        dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
-        dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
-        dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
         if split == "test":
-            self.dataset = dataset_dexycb
+            # dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
+            self.dataset = dataset_ih26
         else:
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
+            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
             self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         self.left_mano_layer = ManoLayer(
             use_pca=False,
