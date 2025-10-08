@@ -76,8 +76,8 @@ def run_training(
     # restore_checkpoint_dir = (Path(__file__).absolute().parent
     #     / "experiments"
     #     / config.experiment_name
-    #     / "v1"
-    #     / "checkpoints_400000")
+    #     / "v2"
+    #     / "checkpoints_1000000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -171,6 +171,7 @@ def run_training(
     loss_helper = training_loss.TrainingLossComputer(config.loss, device=device)
     loop_metrics_gen = training_utils.loop_metric_generator(counter_init=step)
     prev_checkpoint_path: Path | None = None
+    erro_cnt = 0
     while True:
         for train_batch in train_loader:
             loop_metrics = next(loop_metrics_gen)
@@ -180,6 +181,14 @@ def run_training(
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
             )
+            if torch.isnan(loss).any():
+                print("encounter NAN, problematic data are saved!")
+                save_path = experiment_dir / f"error_batch_{step}.pt"
+                torch.save(train_batch,save_path)
+                erro_cnt+=1
+                continue
+            if erro_cnt>10:
+                break
             log_outputs["learning_rate"] = scheduler.get_last_lr()[0]
             accelerator.log(log_outputs, step=step)
             accelerator.backward(loss)

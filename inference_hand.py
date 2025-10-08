@@ -168,7 +168,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion/v1/checkpoints_400000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -219,7 +219,7 @@ def inference_and_visualize(
     start_time = None
 
     window_size = 64
-    overlap_size = 32
+    overlap_size = 8
     canonical_overlap_weights = (
         torch.from_numpy(
             np.minimum(
@@ -354,11 +354,14 @@ def main(args: Args) -> None:
     test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
-        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"global_translation":0}
-        joint_errors = 0
+        errors ={"mano_poses": 20.05293 * 648, "mano_betas": 55.318596*648, "global_orientation":81.87283*648,"global_translation":6.5493684*648}
+        joint_errors = 9.660945416403516 * 648
         from hamer_helper import HamerHelper
         hamer_helper = HamerHelper()        
         for i in range(N):
+            if i<648:
+                continue
+            print("processed at index ", i)
             sample = [dataset.__getitem__(i).to(device)] 
             keys = vars(sample[0]).keys()
             gt = type(sample[0])(**{k: torch.stack([getattr(b, k) for b in sample]) for k in keys})
