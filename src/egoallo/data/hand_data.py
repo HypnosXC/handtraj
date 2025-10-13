@@ -125,7 +125,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # random_variable_len_min: int = 16,
     ) -> None:
         if dataset_name=="dexycb":
-            self._hdf5_path = "/public/datasets/handdata/dexycb_v4.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/dexycb_v5.hdf5"
             self.video_root = "/public/datasets/handdata/dexycb/videos_v4"
         elif dataset_name=="interhand26m":
             self._hdf5_path = "/public/datasets/handdata/interhand26m_v3.hdf5"
@@ -452,17 +452,17 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     
 if __name__ == "__main__":
     # Example usage
-    # dataset = HandHdf5Dataset(split='test')
+    # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb')
     # print(f"Dataset length: {len(dataset)}")
-    # dataset.visualize_manos_in_rgb(170, out_dir="tmp")
+    # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
+
     for split in ['test','train','val']:
-        dataset = HandHdf5Dataset(split=split, dataset_name="interhand26m")
-        if split=='test':
-            dataset.visualize_manos_in_rgb(81, out_dir="tmp")
-            # dataset.visualize_joints_in_rgb(0, out_dir="tmp")
-        print(f"Dataset length of {split}: {len(dataset)}")
-        # for i in tqdm(range(len(dataset))):
-        #     sample = dataset[i]
+        for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
+            dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name)
+            for i in tqdm(range(len(dataset))):
+                sample = dataset[i]
+                # assert sample.mano_betas not all zero
+                assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
