@@ -77,7 +77,7 @@ def run_training(
         / "experiments"
         / config.experiment_name
         / "v0"
-        / "checkpoints_3950000")
+        / "checkpoints_395000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
