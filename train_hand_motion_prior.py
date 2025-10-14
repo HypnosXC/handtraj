@@ -73,11 +73,11 @@ def run_training(
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
-    restore_checkpoint_dir = (Path(__file__).absolute().parent
-        / "experiments"
-        / config.experiment_name
-        / "v0"
-        / "checkpoints_395000")
+    # restore_checkpoint_dir = (Path(__file__).absolute().parent
+    #     / "experiments"
+    #     / config.experiment_name
+    #     / "v1"
+    #     / "checkpoints_500000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -171,7 +171,7 @@ def run_training(
     loss_helper = training_loss.TrainingLossComputer(config.loss, device=device)
     loop_metrics_gen = training_utils.loop_metric_generator(counter_init=step)
     prev_checkpoint_path: Path | None = None
-    erro_cnt = 0
+    error_cnt = 0
     while True:
         for train_batch in train_loader:
             loop_metrics = next(loop_metrics_gen)
@@ -183,12 +183,11 @@ def run_training(
             )
             if torch.isnan(loss).any():
                 print("encounter NAN, problematic data are saved!")
-                save_path = experiment_dir / f"error_batch_{step}.pt"
-                torch.save(train_batch,save_path)
-                erro_cnt+=1
+                if error_cnt>10:
+                    save_path = experiment_dir / f"error_batch_{step}.pt"
+                    torch.save(train_batch,save_path)
+                error_cnt+=1
                 continue
-            if erro_cnt>10:
-                break
             log_outputs["learning_rate"] = scheduler.get_last_lr()[0]
             accelerator.log(log_outputs, step=step)
             accelerator.backward(loss)

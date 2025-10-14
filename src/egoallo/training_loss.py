@@ -29,7 +29,9 @@ class TrainingLossConfig:
             "hand_rotmats": 0.01,
             "mano_betas": 0.1,
             "mano_poses": 1.0,
+            "mano_poses_mat": 1.0,
             "global_orientation": 1.0,
+            "global_ori_mat": 1.0,
             "global_translation": 1.0,
             "mano_side": 1.0
         }.copy
@@ -66,6 +68,7 @@ class TrainingLossComputer:
         model: hand_network.HandDenoiser | DistributedDataParallel | OptimizedModule,
         unwrapped_model: hand_network.HandDenoiser,
         train_batch: HandTrainingData,
+        using_mat: bool,
     ) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute a training loss for the HandDenoiser model.
 
@@ -83,7 +86,7 @@ class TrainingLossComputer:
             mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, time, -1)),
         )
         rel_palm_pose = train_batch.mano_pose[:,:,48:]
-        x_0_packed = x_0.pack()
+        x_0_packed = x_0.pack(using_mat=using_mat)
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, model.get_d_state())
 
@@ -119,7 +122,7 @@ class TrainingLossComputer:
             conds = x_0,
         )
         assert isinstance(x_0_packed_pred, torch.Tensor)
-        x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred)
+        x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat)
 
         weight_t = self.weight_t[t].to(device)
         assert weight_t.shape == (batch,)
@@ -213,7 +216,7 @@ class TrainingLossComputer:
                 contacts=train_batch.contacts,
                 hand_rotmats=None,
             )
-        x_0_packed = x_0.pack()
+        x_0_packed = x_0.pack(using_mat=using_mat)
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
 

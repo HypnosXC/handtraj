@@ -175,6 +175,7 @@ def run_training(
                 model,
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
+                using_mat=True
             )
             log_outputs["learning_rate"] = scheduler.get_last_lr()[0]
             accelerator.log(log_outputs, step=step)

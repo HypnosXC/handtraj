@@ -91,9 +91,11 @@ def render_joint(
 def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
                             intrinsics:torch.FloatTensor,
                             rgb_frames:torch.FloatTensor,
+                            subseq_len: int,
                             out_dir:str = "tmp",
                             fps=10, 
-                            resize=None) -> None:
+                            resize=None,
+                            ) -> None:
     os.makedirs(out_dir, exist_ok=True)
     vertices_list=[]
     faces_list=[]
@@ -105,7 +107,7 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
         vertices_list.append(vertices)
     intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
-    subseq_len, height, width, _ = rgb_frames.shape
+    _, height, width, _ = rgb_frames.shape
     if resize is not None:
         width, height = resize
     else:
@@ -164,7 +166,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_395000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -187,11 +189,14 @@ class Args:
     """Whether to save the output trajectory, which will be placed under `traj_dir/egoallo_outputs/some_name.npz`."""
     visualize_traj: bool = False
     """Whether to visualize the trajectory after sampling."""
+    using_mat: bool = False
+    """whether to use rotation matrix as gt"""
 
 def inference_and_visualize(
         denoiser_network,
         train_batch,
         device,
+        using_mat=False,
         visualized=True):
     noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
         device=device,
@@ -274,7 +279,7 @@ def inference_and_visualize(
             # Take the mean for overlapping regions.
             x_0_packed_pred /= overlap_weights
 
-            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred).pack()
+            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat).pack(using_mat=using_mat)
 
         if torch.any(torch.isnan(x_0_packed_pred)):
             print("found nan", i)
@@ -320,7 +325,7 @@ def inference_and_visualize(
             + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
         )
         x_t_list.append(
-            hand_network.HandDenoiseTraj.unpack(x_t_packed)
+            hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat)
         )
 
         assert start_time is not None
@@ -330,9 +335,10 @@ def inference_and_visualize(
     traj.global_translation = x_0_packed.global_translation.to(device)
     traj.global_orientation = x_0_packed.global_orientation.to(device)
     if visualized == True:
-        visualize_joints_in_rgb([traj,x_0_packed],
+        visualize_joints_in_rgb([x_0_packed,traj],
                                 intrinsics=train_batch.intrinsics.squeeze(0),
                                 rgb_frames=train_batch.rgb_frames.squeeze(0),
+                                subseq_len = train_batch.mask.sum().cpu().numpy(),
                                 out_dir = "tmp/visualize_hand")
         return traj
     else:
@@ -345,6 +351,7 @@ def main(args: Args) -> None:
     dataset = HandHdf5Dataset(split="test",dataset_name = 'dexycb')
     print("Dataset size:", len(dataset))
     visualized = args.visualize
+    using_mat = args.using_mat
     test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
@@ -438,13 +445,13 @@ def main(args: Args) -> None:
         if visualized == True:
             num_samples = 1
             for i in range(num_samples):
-                data_id = 324#random.randint(1,1000)
+                data_id = 829# random.randint(1,1000)
                 rand_id = data_id
                 sample = dataset.__getitem__(data_id)
                 train_batch.append(sample)
             keys = vars(train_batch[0]).keys()
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
-            pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
+            pred = inference_and_visualize(denoiser_network,train_batch,device,using_mat,visualized)
             _,_,joints_pred = pred.apply_to_hand()
             error_joints =  torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
             print("Joint error is ", error_joints)
@@ -469,8 +476,9 @@ def main(args: Args) -> None:
                                                     drop_last=False)
             for train_batch in dataloader:
                 total_size += train_batch.mano_betas.shape[0]
-                pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
+                pred = inference_and_visualize(denoiser_network,train_batch,device,using_mat,visualized)
                 batch,seq_len,_ = train_batch.mano_pose.shape
+                loss_mask = train_batch.mask
                 x_0_packed = hand_network.HandDenoiseTraj(
                                                             mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
                                                             mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
@@ -480,13 +488,13 @@ def main(args: Args) -> None:
                                                         )
                 _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
-                    if var  != "3D_joints" and var  !="mano_poses":
-                        errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+                    if var  != "3D_joints":
+                        err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2)
+                        err = torch.sum(err, dim=tuple(range(1, err.dim())))
+                        errors[var]+=torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum().numpy()
                     else:#MJPE
-                        if var == "3D_joints":
-                            errors[var]+= torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
-                        else:
-                            errors[var]+=((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum().numpy()
+                        err = torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum(dim=-1).cpu()
+                        errors[var]+=torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum().numpy()
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
             
