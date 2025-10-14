@@ -107,7 +107,7 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
         vertices_list.append(vertices)
     intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
-    _, height, width, _ = rgb_frames.shape
+    video_len, height, width, _ = rgb_frames.shape
     if resize is not None:
         width, height = resize
     else:
@@ -189,14 +189,11 @@ class Args:
     """Whether to save the output trajectory, which will be placed under `traj_dir/egoallo_outputs/some_name.npz`."""
     visualize_traj: bool = False
     """Whether to visualize the trajectory after sampling."""
-    using_mat: bool = False
-    """whether to use rotation matrix as gt"""
 
 def inference_and_visualize(
         denoiser_network,
         train_batch,
         device,
-        using_mat=False,
         visualized=True):
     noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
         device=device,
@@ -206,6 +203,7 @@ def inference_and_visualize(
     batch,seq_len,_ = train_batch.mano_pose.shape
     train_batch.to(device)
     print(denoiser_network)
+    using_mat = denoiser_network.config.using_mat
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
         mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
@@ -265,7 +263,7 @@ def inference_and_visualize(
                                                     global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
                                                     mano_side=x_0_packed.mano_side,
                                                     ).to(device)
-                x_0_packed_pred[:, start_t:end_t, :] = (
+                x_0_packed_pred[:, start_t:end_t, :] += (
                     denoiser_network.forward(
                         x_t_packed[:, start_t:end_t, :],
                         torch.tensor([t], device=device).expand((batch,)),
@@ -273,7 +271,7 @@ def inference_and_visualize(
                         project_output_rotmats=False,
                         conds=conds,
                         mask=None,
-                    )
+                    )* overlap_weights_slice
                 )
 
             # Take the mean for overlapping regions.
@@ -348,10 +346,9 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'dexycb')
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'dexycb',vis=True)
     print("Dataset size:", len(dataset))
     visualized = args.visualize
-    using_mat = args.using_mat
     test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
@@ -451,7 +448,7 @@ def main(args: Args) -> None:
                 train_batch.append(sample)
             keys = vars(train_batch[0]).keys()
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
-            pred = inference_and_visualize(denoiser_network,train_batch,device,using_mat,visualized)
+            pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
             _,_,joints_pred = pred.apply_to_hand()
             error_joints =  torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
             print("Joint error is ", error_joints)
@@ -476,7 +473,7 @@ def main(args: Args) -> None:
                                                     drop_last=False)
             for train_batch in dataloader:
                 total_size += train_batch.mano_betas.shape[0]
-                pred = inference_and_visualize(denoiser_network,train_batch,device,using_mat,visualized)
+                pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
                 batch,seq_len,_ = train_batch.mano_pose.shape
                 loss_mask = train_batch.mask
                 x_0_packed = hand_network.HandDenoiseTraj(

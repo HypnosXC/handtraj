@@ -180,6 +180,7 @@ def run_training(
                 model,
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
+                using_mat=model.config.using_mat,
             )
             if torch.isnan(loss).any():
                 print("encounter NAN, problematic data are saved!")
