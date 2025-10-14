@@ -111,6 +111,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         dataset_name: str = "dexycb", # dexycb, interhand26m, arctic
         # hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5", # 
         split: Literal["train", "val", "test"] = "train",
+        vis: bool = False,
         # file_list_path: Path,
         # splits: tuple[
         #     Literal["train", "val", "test"], ...
@@ -138,6 +139,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # self.rgb_format = "color_{:06d}.jpg"
         self.split = split
         self.dataset_name = dataset_name
+        self.vis = vis
         with h5py.File(self._hdf5_path, "r") as hdf5_file:
             # ]
             dataset = hdf5_file[self.split]
@@ -181,7 +183,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
             assert os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))), f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}"
             # print("Video name: ", dataset['video_name'][index][0].decode('utf-8'))
-            if self.split == 'test':
+            if self.vis:
                 if 'rgb_frames' in dataset:
                     kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
                 elif 'video_name' in dataset:
@@ -334,18 +336,18 @@ from torch.utils.data import ConcatDataset
 class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
     # to a single dataset
-    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m"] = None) -> None:
-        if dataset_name is None and split == "test":
-            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
-            self.dataset = dataset_dexycb
-        elif dataset_name is None or dataset_name == "all":
-            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m")
-            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
-            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic")
+    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m"] = 'all', vis=False) -> None:
+        # if dataset_name is None and split == "test":
+        #     dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
+        #     self.dataset = dataset_dexycb
+        if dataset_name == "all":
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis)
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis)
+            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis)
         
             self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         else:
-            self.dataset = HandHdf5EachDataset(split=split, dataset_name=dataset_name)
+            self.dataset = HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)
         
         self.left_mano_layer = ManoLayer(
             use_pca=False,
