@@ -184,7 +184,7 @@ def run_training(
             )
             if torch.isnan(loss).any():
                 print("encounter NAN, problematic data are saved!")
-                if error_cnt>10:
+                if error_cnt<10:
                     save_path = experiment_dir / f"error_batch_{step}.pt"
                     torch.save(train_batch,save_path)
                 error_cnt+=1
