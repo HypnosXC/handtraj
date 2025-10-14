@@ -459,22 +459,12 @@ if __name__ == "__main__":
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
 
     for split in ['test','train','val']:
-<<<<<<< HEAD
-        dataset = HandHdf5Dataset(split=split, dataset_name="dexycb")
-        print(f"Dataset length of {split}: {len(dataset)}")
-        if split=='test':
-            dataset.visualize_manos_in_rgb(324, out_dir="tmp")
-            # dataset.visualize_joints_in_rgb(0, out_dir="tmp")
-        # for i in tqdm(range(len(dataset))):
-        #     sample = dataset[i]
-=======
         for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
             dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name)
             for i in tqdm(range(len(dataset))):
                 sample = dataset[i]
                 # assert sample.mano_betas not all zero
                 assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
->>>>>>> dc9ace06aab966a2da7d85aa387d932e9b0515d3
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
