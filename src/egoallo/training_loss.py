@@ -14,7 +14,6 @@ from .data.amass import EgoTrainingData
 from .data.dataclass import HandTrainingData
 from .sampling import CosineNoiseScheduleConstants
 from .transforms import SO3
-from hamer_helper import HamerHelper
 
 @dataclasses.dataclass(frozen=True)
 class TrainingLossConfig:
@@ -70,6 +69,7 @@ class TrainingLossComputer:
         train_batch: HandTrainingData,
         using_mat: bool,
         using_img_feat:bool,
+        hamer_helper=None,
     ) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute a training loss for the HandDenoiser model.
 
@@ -79,6 +79,18 @@ class TrainingLossComputer:
         log_outputs: dict[str, Tensor | float] = {}
         batch, time, dim = train_batch.mano_pose.shape
         assert dim == 51
+        if using_img_feat:
+            cond_feat = []
+            _,_,H,W,C = train_batch.rgb_frames.shape
+            mano_side = train_batch.mano_side.squeeze(1).cpu().numpy()
+            frames = train_batch.rgb_frames.reshape(-1,H,W,C).cpu().numpy() #(b,time,h,w,3)->(b*time,h,w,3)
+            for i in range(batch):
+                for j in range(time):
+                    frame = frames[i*time+j,:,:,:]
+                    cond_feat.append(hamer_helper.get_img_feats(frame,mano_side=mano_side[i]).to(train_batch.mano_betas.device))
+            cond_feat = torch.stack(cond_feat).reshape(batch,time,-1)
+        else:
+            cond_feat = None
         x_0 = hand_network.HandDenoiseTraj(
             mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, time, 10)),
             mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,time,15,3),
@@ -121,9 +133,10 @@ class TrainingLossComputer:
             if self.config.cond_dropout_prob > 0.0
             else None,
             conds = x_0,
+            img_feat = cond_feat
         )
         assert isinstance(x_0_packed_pred, torch.Tensor)
-        x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat)
+        x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0.mano_side)
 
         weight_t = self.weight_t[t].to(device)
         assert weight_t.shape == (batch,)

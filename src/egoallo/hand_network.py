@@ -52,17 +52,17 @@ class HandDenoiseTraj(TensorDataclass):
         *batch,time,_,_=kwargs["mano_poses"].shape
         self.mano_betas=kwargs["mano_betas"]
         self.mano_poses=kwargs["mano_poses"]
+        self.mano_poses_mat=SO3.exp(kwargs["mano_poses"]).as_matrix().reshape((*batch,time,15,9))
         self.global_orientation=kwargs["global_orientation"]
+        self.global_ori_mat=SO3.exp(kwargs["global_orientation"]).as_matrix().reshape((*batch,time,9))
         self.global_translation=kwargs["global_translation"]
         self.mano_side=kwargs["mano_side"]
-        self.mano_poses_mat=SO3.exp(kwargs["mano_poses"]).as_matrix().reshape((*batch,time,15,9))
-        self.global_ori_mat=SO3.exp(kwargs["global_orientation"]).as_matrix().reshape((*batch,time,9))
     @staticmethod
     def get_packed_dim(using_mat:bool) -> int:
         if using_mat:
-            packed_dim = 10 + 15 * 9 + 9 + 3 + 1
+            packed_dim = 10 + 15 * 9 + 9 + 3
         else:
-            packed_dim = 10 + 15 * 3 + 3 + 3 + 1
+            packed_dim = 10 + 15 * 3 + 3 + 3
         return packed_dim
 
     def apply_to_hand(self,) -> tuple[torch.Tensor, torch.Tensor]:
@@ -120,7 +120,7 @@ class HandDenoiseTraj(TensorDataclass):
             [
                 value_list[x].reshape((*batch, time, -1))
                 for x in value_list.keys()
-                if x not in ["mano_poses","global_orientation"]
+                if x not in ["mano_poses","global_orientation","mano_side"]
             ],
             dim=-1,
             )
@@ -129,7 +129,7 @@ class HandDenoiseTraj(TensorDataclass):
             [
                 value_list[x].reshape((*batch, time, -1))
                 for x in value_list.keys()
-                if x not in ["mano_poses_mat","global_ori_mat"]
+                if x not in ["mano_poses_mat","global_ori_mat","mano_side"]
             ],
             dim=-1,
             )
@@ -139,8 +139,10 @@ class HandDenoiseTraj(TensorDataclass):
     def unpack(
         cls,
         x: Float[Tensor, "*#batch timesteps d_state"],
+        mano_side: Float[Tensor, "batch time 1"],
         using_mat: bool,
         project_rotmats: bool = False,
+        
     ) -> HandDenoiseTraj:
         """Unpack trajectory from a single flattened vector.
 
@@ -151,15 +153,15 @@ class HandDenoiseTraj(TensorDataclass):
         (*batch, time, d_state) = x.shape
         assert d_state == cls.get_packed_dim(using_mat)
         if using_mat:
-            mano_betas, mano_poses_mat, global_ori_mat,global_translation,mano_side = torch.split(
-                x, [10, 15 * 9, 9, 3, 1], dim=-1
+            mano_betas, mano_poses_mat, global_ori_mat,global_translation = torch.split(
+                x, [10, 15 * 9, 9, 3], dim=-1
             )
             mano_poses_mat = mano_poses_mat.reshape((*batch, time, 15, 9))
             mano_poses = SO3.from_matrix(mano_poses_mat.reshape((*batch, time, 15, 3, 3))).log()
             global_orientation = SO3.from_matrix(global_ori_mat.reshape(((*batch, time, 3, 3)))).log()
         else:
-            mano_betas, mano_poses, global_orientation,global_translation,mano_side = torch.split(
-                x, [10, 15 * 3, 3, 3, 1], dim=-1
+            mano_betas, mano_poses, global_orientation,global_translation = torch.split(
+                x, [10, 15 * 3, 3, 3], dim=-1
             )
             mano_poses = mano_poses.reshape((*batch, time, 15, 3))
             mano_poses_mat = SO3.exp(mano_poses).as_matrix().reshape((*batch, time, 15, 9))
@@ -192,7 +194,7 @@ class HandDenoiserConfig:
     decoder_layers: int = 6
     dropout_p: float = 0.0
     using_mat: bool = False
-    using_img_feat: bool = False
+    using_img_feat: bool = True
     activation: Literal["gelu", "relu"] = "gelu"
 
     positional_encoding: Literal["transformer", "rope"] = "rope"
@@ -250,7 +252,7 @@ class HandDenoiserConfig:
         # hand conditioning.
 
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
-        if using_img_feat:
+        if self.using_img_feat:
             d_cond += 128 ## compress img_feat to 128
         return d_cond
 
@@ -412,10 +414,10 @@ class HandDenoiser(nn.Module):
         t: Float[Tensor, "batch"],
         *,
         rel_palm_pose: Float[Tensor, "batch time 3"],
-        img_feat: Float[Tensor, "batch time 1280"],
         # extracted feat from ViT H
         project_output_rotmats: bool,
         # Observed hand positions, relative to the CPF.
+        img_feat: Float[Tensor, "batch time 1280"]| None = None,
         mask: Bool[Tensor, "batch time"] | None,
         # Mask for when to drop out / keep conditioning information.
         cond_dropout_keep_mask: Bool[Tensor, "batch"] | None = None,
@@ -425,7 +427,7 @@ class HandDenoiser(nn.Module):
         level, not a timestep."""
         config = self.config
 
-        x_t = HandDenoiseTraj.unpack(x_t_packed,using_mat=self.config.using_mat)
+        x_t = HandDenoiseTraj.unpack(x_t_packed,using_mat=self.config.using_mat,mano_side=conds.mano_side)
         (batch, time, num_hand_joints, _) = x_t.mano_poses.shape
         assert num_hand_joints == 15
 
@@ -436,7 +438,6 @@ class HandDenoiser(nn.Module):
                 + self.encoders["mano_poses_mat"](x_t.mano_poses_mat.reshape((batch, time, -1)))
                 + self.encoders["global_ori_mat"](x_t.global_ori_mat)
                 + self.encoders["global_translation"](x_t.global_translation)
-                + self.encoders["mano_side"](x_t.mano_side)
             )
         else:
             x_t_encoded = (
@@ -444,7 +445,6 @@ class HandDenoiser(nn.Module):
                 + self.encoders["mano_poses"](x_t.mano_poses.reshape((batch, time, -1)))
                 + self.encoders["global_orientation"](x_t.global_orientation)
                 + self.encoders["global_translation"](x_t.global_translation)
-                + self.encoders["mano_side"](x_t.mano_side)
             )
         assert x_t_encoded.shape == (batch, time, config.d_latent)
 
@@ -459,7 +459,7 @@ class HandDenoiser(nn.Module):
             conds = conds
         )
         if config.using_img_feat:
-            cond = cond.cat((cond,self.img_enc(img_feat)),dim=-1)
+            cond = torch.cat((cond,self.img_enc(img_feat)),dim=-1)
         # Randomly drop out conditioning information; this serves as a
         # regularizer that aims to improve sample diversity.
         if cond_dropout_keep_mask is not None:

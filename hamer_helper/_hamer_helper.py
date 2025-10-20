@@ -162,7 +162,7 @@ class HamerHelper:
         )
     def get_img_feats(
         self,
-        image: Int[np.ndarray, "height width 3"],
+        image: Int[np.ndarray, "batch height width 3"],
         mano_side = bool,
         rescale_factor: float = 2.0,
     ):
@@ -263,7 +263,8 @@ class HamerHelper:
                 is_right.append(1)
 
         if len(bboxes) == 0:
-            return None, None
+            # print("no get feat!")
+            return torch.zeros((1,1280))
 
         boxes = np.stack(bboxes)
         right = np.stack(is_right)
@@ -289,12 +290,12 @@ class HamerHelper:
             batch: Any = recursive_to(batch, self.device)
             with torch.no_grad():
                 out = self._model.forward(batch)
-        if out.get("cond_feat") ==None:
-            print("no get feat!")
+        if out.get("cond_feat") == None:
+            # print("no get feat!")
             return torch.zeros((1,1280))
         else:
-            print("get cond feat shape",out["cond_feat"].shape)
-            return out["cond_feat"]
+            # print("get cond feat shape",out["cond_feat"].shape)
+            return out["cond_feat"][:1,:]
     def look_for_hands(
         self,
         image: Int[np.ndarray, "height width 3"],

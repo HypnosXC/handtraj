@@ -29,7 +29,7 @@ class HandTrainConfig:
     loss: training_loss.TrainingLossConfig = training_loss.TrainingLossConfig()
 
     # Dataset arguments.
-    batch_size: int = 256
+    batch_size: int = 2#256
     """Effective batch size."""
     num_workers: int = 2
     subseq_len: int = 128
@@ -73,11 +73,11 @@ def run_training(
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
-    restore_checkpoint_dir = (Path(__file__).absolute().parent
-        / "experiments"
-        / config.experiment_name
-        / "v1"
-        / "checkpoints_580000")
+    # restore_checkpoint_dir = (Path(__file__).absolute().parent
+    #     / "experiments"
+    #     / config.experiment_name
+    #     / "v1"
+    #     / "checkpoints_580000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -125,6 +125,8 @@ def run_training(
             # cache_files=True,
             # slice_strategy=config.dataset_slice_strategy,
             # random_variable_len_proportion=config.dataset_slice_random_variable_len_proportion,
+            dataset_name = 'dexycb',
+            vis=True
         ),
         batch_size=config.batch_size,
         shuffle=True,
@@ -172,6 +174,11 @@ def run_training(
     loop_metrics_gen = training_utils.loop_metric_generator(counter_init=step)
     prev_checkpoint_path: Path | None = None
     error_cnt = 0
+    if model.config.using_img_feat:
+        from hamer_helper import HamerHelper
+        hamer_helper = HamerHelper()
+    else:
+        hamer_helper = None
     while True:
         for train_batch in train_loader:
             loop_metrics = next(loop_metrics_gen)
@@ -181,7 +188,8 @@ def run_training(
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
                 using_mat=model.config.using_mat,
-                using_img_feat=model.config.using_img_feat
+                using_img_feat=model.config.using_img_feat,
+                hamer_helper = hamer_helper
             )
             if torch.isnan(loss).any():
                 print("encounter NAN, problematic data are saved!")
