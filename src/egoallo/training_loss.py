@@ -14,7 +14,7 @@ from .data.amass import EgoTrainingData
 from .data.dataclass import HandTrainingData
 from .sampling import CosineNoiseScheduleConstants
 from .transforms import SO3
-
+from hamer_helper import HamerHelper
 
 @dataclasses.dataclass(frozen=True)
 class TrainingLossConfig:
@@ -69,6 +69,7 @@ class TrainingLossComputer:
         unwrapped_model: hand_network.HandDenoiser,
         train_batch: HandTrainingData,
         using_mat: bool,
+        using_img_feat:bool,
     ) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute a training loss for the HandDenoiser model.
 
@@ -151,8 +152,27 @@ class TrainingLossComputer:
                 )
                 / bt_mask_sum
             )
-
-        loss_terms: dict[str, Tensor | float] = {
+        if using_mat:
+            loss_terms: dict[str, Tensor | float] = {
+            "mano_betas": weight_and_mask_loss(
+                # (b, t, 10)
+                (x_0_pred.mano_betas - x_0.mano_betas) ** 2
+                # (10,)
+                * x_0.mano_betas.new_tensor(self.config.beta_coeff_weights),
+            ),
+            "mano_poses_mat": weight_and_mask_loss(
+                # (b, t, 15 * 3)
+                (x_0_pred.mano_poses_mat - x_0.mano_poses_mat).reshape(
+                    (batch, time, 15 * 9)
+                )
+                ** 2,
+            ),
+            "global_ori_mat": weight_and_mask_loss((x_0_pred.global_ori_mat - x_0.global_ori_mat) ** 2),
+            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
+            "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
+            }
+        else:
+            loss_terms: dict[str, Tensor | float] = {
             "mano_betas": weight_and_mask_loss(
                 # (b, t, 10)
                 (x_0_pred.mano_betas - x_0.mano_betas) ** 2
@@ -169,7 +189,7 @@ class TrainingLossComputer:
             "global_orientation": weight_and_mask_loss((x_0_pred.global_orientation - x_0.global_orientation) ** 2),
             "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
             "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
-        }
+            }
 
 
         # assert loss_terms.keys() == self.config.loss_weights.keys()
@@ -216,7 +236,7 @@ class TrainingLossComputer:
                 contacts=train_batch.contacts,
                 hand_rotmats=None,
             )
-        x_0_packed = x_0.pack(using_mat=using_mat)
+        x_0_packed = x_0.pack()
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
 

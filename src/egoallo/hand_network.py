@@ -11,7 +11,6 @@ from jaxtyping import Bool, Float
 from loguru import logger
 from rotary_embedding_torch import RotaryEmbedding
 from torch import Tensor, nn
-
 from manopth.manolayer import ManoLayer
 from .tensor_dataclass import TensorDataclass
 from .transforms import SE3, SO3
@@ -193,6 +192,7 @@ class HandDenoiserConfig:
     decoder_layers: int = 6
     dropout_p: float = 0.0
     using_mat: bool = False
+    using_img_feat: bool = False
     activation: Literal["gelu", "relu"] = "gelu"
 
     positional_encoding: Literal["transformer", "rope"] = "rope"
@@ -232,7 +232,7 @@ class HandDenoiserConfig:
         elif self.cond_param == "wrist_motion":
             d_cond = 0
             d_cond += 0 ## root position
-            d_cond += 12 ## differential motion
+            d_cond += 13 ## differential motion
         elif self.cond_param == "canonicalized":
             d_cond = 12
         elif self.cond_param == "absolute":
@@ -250,6 +250,8 @@ class HandDenoiserConfig:
         # hand conditioning.
 
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
+        if using_img_feat:
+            d_cond += 128 ## compress img_feat to 128
         return d_cond
 
     def make_cond(
@@ -279,9 +281,10 @@ class HandDenoiserConfig:
             cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
                               diff_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))),
                               dim=1)
+            cond = torch.cat((cond,conds.mano_side),dim=-1)
         else:
             assert_never(self.cond_param)
-        cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)
+        cond = fourier_encode(cond, freqs=self.fourier_enc_freqs)        
         return cond
 
 
@@ -297,7 +300,8 @@ class HandDenoiser(nn.Module):
 
         self.config = config
         Activation = {"gelu": nn.GELU, "relu": nn.ReLU}[config.activation]
-
+        if config.using_img_feat:
+            self.img_enc = nn.Linear(1280,128)
         # MLP encoders and decoders for each modality we want to denoise.
         if config.using_mat:
             modality_dims: dict[str, int] = {
@@ -305,7 +309,6 @@ class HandDenoiser(nn.Module):
                 "mano_poses_mat": 15 * 9,
                 "global_ori_mat": 9,
                 "global_translation":3,
-                "mano_side":1
             }
         else:
             modality_dims: dict[str, int] = {
@@ -313,7 +316,6 @@ class HandDenoiser(nn.Module):
                 "mano_poses": 15 * 3,
                 "global_orientation": 3,
                 "global_translation":3,
-                "mano_side":1
             }
         print("model dim is",sum(modality_dims.values()), "and traj dim is", self.get_d_state())
         assert sum(modality_dims.values()) == self.get_d_state()
@@ -410,6 +412,8 @@ class HandDenoiser(nn.Module):
         t: Float[Tensor, "batch"],
         *,
         rel_palm_pose: Float[Tensor, "batch time 3"],
+        img_feat: Float[Tensor, "batch time 1280"],
+        # extracted feat from ViT H
         project_output_rotmats: bool,
         # Observed hand positions, relative to the CPF.
         mask: Bool[Tensor, "batch time"] | None,
@@ -454,7 +458,8 @@ class HandDenoiser(nn.Module):
             rel_palm_pose = rel_palm_pose,
             conds = conds
         )
-
+        if config.using_img_feat:
+            cond = cond.cat((cond,self.img_enc(img_feat)),dim=-1)
         # Randomly drop out conditioning information; this serves as a
         # regularizer that aims to improve sample diversity.
         if cond_dropout_keep_mask is not None:

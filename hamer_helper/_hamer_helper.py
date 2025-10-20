@@ -160,7 +160,141 @@ class HamerHelper:
             / self._model_cfg.MODEL.IMAGE_SIZE
             * max(h, w)
         )
+    def get_img_feats(
+        self,
+        image: Int[np.ndarray, "height width 3"],
+        mano_side = bool,
+        rescale_factor: float = 2.0,
+    ):
+        """get image encoded feature from HaMeR ViT backbone"""
+        assert image.shape[-1] == 3
 
+        # image must be `np.uint8`, and in range [0, 255].
+        assert image.dtype == np.uint8
+
+        # Detectron expects BGR image.
+        det_out = self._detector(image[:, :, ::-1])
+        det_instances = det_out["instances"]
+        valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > 0.5)
+        pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
+        pred_scores = det_instances.scores[valid_idx].cpu().numpy()
+
+        # Detect human keypoints for each person
+        vitposes_out = self._cpm.predict_pose(
+            image,
+            [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)],
+        )
+
+        bboxes = []
+        is_right = []
+
+        # Use hands based on hand keypoint detections
+        for vitposes in vitposes_out:
+            left_hand_keyp = vitposes["keypoints"][-42:-21]
+            right_hand_keyp = vitposes["keypoints"][-21:]
+
+            lbbox = None
+            rbbox = None
+
+            # Rejecting not confident detections
+            ldetect = rdetect = False
+            keyp = left_hand_keyp
+            valid = keyp[:, 2] > 0.5
+            if sum(valid) > 3 and mano_side == False: # require left hand feat
+                lbbox = [
+                    keyp[valid, 0].min(),
+                    keyp[valid, 1].min(),
+                    keyp[valid, 0].max(),
+                    keyp[valid, 1].max(),
+                ]
+                ldetect = True
+            keyp = right_hand_keyp
+            valid = keyp[:, 2] > 0.5
+            if sum(valid) > 3 and mano_side == True: # require right hand feat
+                rbbox = [
+                    keyp[valid, 0].min(),
+                    keyp[valid, 1].min(),
+                    keyp[valid, 0].max(),
+                    keyp[valid, 1].max(),
+                ]
+                rdetect = True
+
+            # suppressing
+            if ldetect == True and rdetect == True:
+                bboxes_dims = [
+                    left_hand_keyp[:, 0].max() - left_hand_keyp[:, 0].min(),
+                    left_hand_keyp[:, 1].max() - left_hand_keyp[:, 1].min(),
+                    right_hand_keyp[:, 0].max() - right_hand_keyp[:, 0].min(),
+                    right_hand_keyp[:, 1].max() - right_hand_keyp[:, 1].min(),
+                ]
+                norm_side = max(bboxes_dims)
+                keyp_dist = (
+                    np.sqrt(
+                        np.sum(
+                            (right_hand_keyp[:, :2] - left_hand_keyp[:, :2]) ** 2,
+                            axis=1,
+                        )
+                    )
+                    / norm_side
+                )
+                if np.mean(keyp_dist) < 0.5:
+                    if left_hand_keyp[0, 2] - right_hand_keyp[0, 2] > 0:
+                        assert lbbox is not None
+                        bboxes.append(lbbox)
+                        is_right.append(0)
+                    else:
+                        assert rbbox is not None
+                        bboxes.append(rbbox)
+                        is_right.append(1)
+                else:
+                    assert lbbox is not None
+                    assert rbbox is not None
+                    bboxes.append(lbbox)
+                    is_right.append(0)
+                    bboxes.append(rbbox)
+                    is_right.append(1)
+            elif ldetect == True:
+                assert lbbox is not None
+                bboxes.append(lbbox)
+                is_right.append(0)
+            elif rdetect == True:
+                assert rbbox is not None
+                bboxes.append(rbbox)
+                is_right.append(1)
+
+        if len(bboxes) == 0:
+            return None, None
+
+        boxes = np.stack(bboxes)
+        right = np.stack(is_right)
+
+        dataset = ViTDetDataset(
+            self._model_cfg,
+            # HaMeR expects BGR.
+            image[:, :, ::-1],
+            boxes,
+            right,
+            rescale_factor=rescale_factor,
+        )
+
+        # ViT detector will give us multiple detections. We want to run HaMeR
+        # on each.
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=8, shuffle=False, num_workers=0
+        )
+        outputs: list[_RawHamerOutputs] = []
+        from hamer.utils import recursive_to
+        out = {}
+        for batch in dataloader:
+            batch: Any = recursive_to(batch, self.device)
+            with torch.no_grad():
+                out = self._model.forward(batch)
+        if out.get("cond_feat") ==None:
+            print("no get feat!")
+            return torch.zeros((1,1280))
+        else:
+            print("get cond feat shape",out["cond_feat"].shape)
+            return out["cond_feat"]
     def look_for_hands(
         self,
         image: Int[np.ndarray, "height width 3"],

@@ -73,11 +73,11 @@ def run_training(
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
-    # restore_checkpoint_dir = (Path(__file__).absolute().parent
-    #     / "experiments"
-    #     / config.experiment_name
-    #     / "v1"
-    #     / "checkpoints_500000")
+    restore_checkpoint_dir = (Path(__file__).absolute().parent
+        / "experiments"
+        / config.experiment_name
+        / "v1"
+        / "checkpoints_580000")
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -181,6 +181,7 @@ def run_training(
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
                 using_mat=model.config.using_mat,
+                using_img_feat=model.config.using_img_feat
             )
             if torch.isnan(loss).any():
                 print("encounter NAN, problematic data are saved!")

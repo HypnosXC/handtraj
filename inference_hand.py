@@ -166,7 +166,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_395000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_290000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -352,13 +352,11 @@ def main(args: Args) -> None:
     test_hamer = args.Test_hamer
     if test_hamer == True:
         N = len(dataset)
-        errors ={"mano_poses": 20.05293 * 648, "mano_betas": 55.318596*648, "global_orientation":81.87283*648,"global_translation":6.5493684*648}
-        joint_errors = 9.660945416403516 * 648
+        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"global_translation":0}
+        joint_errors = 0
         from hamer_helper import HamerHelper
         hamer_helper = HamerHelper()        
         for i in range(N):
-            if i<648:
-                continue
             print("processed at index ", i)
             sample = [dataset.__getitem__(i).to(device)] 
             keys = vars(sample[0]).keys()
@@ -367,6 +365,10 @@ def main(args: Args) -> None:
             subseq_len = gt.mano_pose.shape[1]
             hamer_out = []
             for j in range(subseq_len):
+                feat = hamer_helper.get_img_feats(
+                sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),
+                mano_side = (gt.mano_side.cpu().numpy() == 1)
+                )
                 hamer_out_frame = {}            
                 hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
                     sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),
@@ -486,12 +488,15 @@ def main(args: Args) -> None:
                 _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
                     if var  != "3D_joints":
-                        err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2)
-                        err = torch.sum(err, dim=tuple(range(1, err.dim())))
-                        errors[var]+=torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum().numpy()
+                        err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1)
+                        print("err shape",err.shape, " and mask shape", loss_mask.shape)
+                        if len(err.shape)>2:
+                            print("err shape",err.shape, " and mask shape", loss_mask.shape)
+                            err = err.sum(dim=-1)
+                        errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy()
                     else:#MJPE
-                        err = torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum(dim=-1).cpu()
-                        errors[var]+=torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum().numpy()
+                        err = torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).cpu()
+                        errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy() * 1000
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
             
