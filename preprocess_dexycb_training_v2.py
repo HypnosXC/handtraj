@@ -125,8 +125,8 @@ class DexYCBDataset():
     self._w = 640
 
     
-    self.max_len=0
-    self.min_len=1000000
+    # self.max_len=0
+    # self.min_len=1000000
 
     self._obj_file = {
         k: os.path.join(self._model_dir, v, "textured_simple.obj")
@@ -210,7 +210,30 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        all_arrangements.append((id_sub, id_ser, id_seq))
+                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        with open(meta_file, 'r') as f:
+                            meta = yaml.load(f, Loader=yaml.FullLoader)
+                        num_frames = meta['num_frames']
+                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
+                                            _SERIALS[id_ser])
+                        
+                        start_frame = 0
+                        for i in range(num_frames):
+                            mano_labels_file = os.path.join(this_data_path, f'labels_{i:06d}.npz')
+                            label = np.load(mano_labels_file)
+                            mano_pose = label['pose_m']
+                            if sum(mano_pose[0,:3])!=0:
+                                start_frame = i
+                                break
+                        
+                        real_num_frames = num_frames - start_frame
+                        if real_num_frames > 64:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame,64))
+                            all_arrangements.append((id_sub, id_ser, id_seq, num_frames - 64,64))
+                        else:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame, real_num_frames))
             self._mapping = np.array(all_arrangements)
         if self._split == 'val':
             subject_ind = [9]  # 验证使用单个受试者
@@ -220,7 +243,30 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        all_arrangements.append((id_sub, id_ser, id_seq))
+                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        with open(meta_file, 'r') as f:
+                            meta = yaml.load(f, Loader=yaml.FullLoader)
+                        num_frames = meta['num_frames']
+                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
+                                            _SERIALS[id_ser])
+                        
+                        start_frame = 0
+                        for i in range(num_frames):
+                            mano_labels_file = os.path.join(this_data_path, f'labels_{i:06d}.npz')
+                            label = np.load(mano_labels_file)
+                            mano_pose = label['pose_m']
+                            if sum(mano_pose[0,:3])!=0:
+                                start_frame = i
+                                break
+                        
+                        real_num_frames = num_frames - start_frame
+                        if real_num_frames > 64:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame,64))
+                            all_arrangements.append((id_sub, id_ser, id_seq, num_frames - 64,64))
+                        else:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame, real_num_frames))
             self._mapping = np.array(all_arrangements)
         if self._split == 'test':
             subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8]  # 测试使用多个受试者
@@ -230,13 +276,61 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        all_arrangements.append((id_sub, id_ser, id_seq))
+                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        with open(meta_file, 'r') as f:
+                            meta = yaml.load(f, Loader=yaml.FullLoader)
+                        num_frames = meta['num_frames']
+                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
+                                            _SERIALS[id_ser])
+                        
+                        start_frame = 0
+                        for i in range(num_frames):
+                            mano_labels_file = os.path.join(this_data_path, f'labels_{i:06d}.npz')
+                            label = np.load(mano_labels_file)
+                            mano_pose = label['pose_m']
+                            if sum(mano_pose[0,:3])!=0:
+                                start_frame = i
+                                break
+                        
+                        real_num_frames = num_frames - start_frame
+                        if real_num_frames > 64:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame,64))
+                            all_arrangements.append((id_sub, id_ser, id_seq, num_frames - 64,64))
+                        else:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame, real_num_frames))
+
+                        # all_arrangements.append((id_sub, id_ser, id_seq))
             sequence_ind = [i for i in range(100) if i // 5 in (3,)]
             serial_ind = [0, 1, 2, 3, 4, 5, 6]
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        all_arrangements.append((id_sub, id_ser, id_seq))
+                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        with open(meta_file, 'r') as f:
+                            meta = yaml.load(f, Loader=yaml.FullLoader)
+                        num_frames = meta['num_frames']
+                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
+                                            _SERIALS[id_ser])
+                        
+                        start_frame = 0
+                        for i in range(num_frames):
+                            mano_labels_file = os.path.join(this_data_path, f'labels_{i:06d}.npz')
+                            label = np.load(mano_labels_file)
+                            mano_pose = label['pose_m']
+                            if sum(mano_pose[0,:3])!=0:
+                                start_frame = i
+                                break
+                        
+                        real_num_frames = num_frames - start_frame
+                        if real_num_frames > 64:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame,64))
+                            all_arrangements.append((id_sub, id_ser, id_seq, num_frames - 64,64))
+                        else:
+                            all_arrangements.append((id_sub, id_ser, id_seq, start_frame, real_num_frames))
             self._mapping = np.array(all_arrangements)
             sequence_ind = list(range(100))
 
@@ -262,21 +356,22 @@ class DexYCBDataset():
             intr['fx'], intr['fy'], intr['ppx'], intr['ppy']
         ])
 
-    for id_sub, id_ser, id_seq in tqdm.tqdm(self._mapping, desc="Loading dataset"):
+    for id_sub, id_ser, id_seq, start_frame, seq_len in tqdm.tqdm(self._mapping, desc="Loading dataset"):
         meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                 os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq],"meta.yml")
+                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
         # pose_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
         #                          os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq], "pose.npz")
         with open(meta_file, 'r') as f:
             meta = yaml.load(f, Loader=yaml.FullLoader)
         # self._num_frames.append(meta['num_frames'])
-        num_frames = meta['num_frames']
-        start_frame = num_frames // 2 - 32
+        # num_frames = meta['num_frames']
+
+        # start_frame = num_frames // 2 - 32
         self._start_frames.append(start_frame)
-        if meta['num_frames'] > self.max_len:
-            self.max_len = meta['num_frames']
-        if meta['num_frames'] < self.min_len:
-            self.min_len = meta['num_frames']
+        # if meta['num_frames'] > self.max_len:
+        #     self.max_len = meta['num_frames']
+        # if meta['num_frames'] < self.min_len:
+        #     self.min_len = meta['num_frames']
         # self._ycb_ids.append(meta['ycb_ids'])
         # self._ycb_grasp_ind.append(meta['ycb_grasp_ind'])
         self._mano_side.append(meta['mano_sides'][0])
@@ -298,20 +393,22 @@ class DexYCBDataset():
         self._mano_betas.append(mano_calib['betas'])
 
   def __getitem__(self, idx):
-    id_sub, id_ser, id_seq = self._mapping[idx]
+    id_sub, id_ser, id_seq, start_frame, seq_len = self._mapping[idx]
     d = os.path.join(self._data_dir, _SUBJECTS[id_sub])
-    d = os.path.join(d, os.listdir(d)[id_seq], 
+    d = os.path.join(d, sorted(os.listdir(d))[id_seq], 
                      _SERIALS[id_ser])
     sample = {
         'data_dir': d,
         # 'num_frames': self._num_frames[idx],
-        'start_frame': self._start_frames[idx],
+        'start_frame': start_frame,
+        'seq_len': seq_len,
         'intrinsics': self._intrinsics[id_ser],
         'mano_side': self._mano_side[idx],
         'mano_betas': self._mano_betas[idx],
         'extrinsics': self.extrinsics[idx],
         # 'mano_poses': self.poses[idx]
         # 'hand_3d_joints': self.hand_3d_joints[idx],
+        'video_name': f'{_SUBJECTS[id_sub]}_{_SERIALS[id_ser]}_{id_seq}_{start_frame}_{seq_len}.mp4',
     }
     return sample
   
@@ -354,7 +451,17 @@ def pca_coeffs_to_axis45(coeffs_pca: torch.Tensor, layer: ManoLayer) -> torch.Te
     pose45 = pose45 + mean                       
     return pose45
 
-import imageio.v3 as iio
+import imageio.v2 as iio
+
+def write_videos(video_args):
+    split,this_data_dir,start_frame,seq_len,video_name = video_args
+    video_path = os.path.join("/public/datasets/handdata/dexycb/videos_v4", split, video_name)
+    writer = iio.get_writer(video_path, fps=30,macro_block_size=None)
+    for i in range(start_frame, start_frame + seq_len):
+        img_path = os.path.join(this_data_dir, f"color_{i:06d}.jpg")
+        rgb_img = iio.imread(img_path)
+        writer.append_data(rgb_img)
+    writer.close()
 
 def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
     train_dataset = DexYCBDataset(split='train', setup='s_all_unseen')
@@ -376,9 +483,10 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
         'mano_betas': (10,),  # 10 betas for MANO model 
         'extrinsics': (3, 4),  # 3x4 matrix for extrinsics
         'mano_joint_3d':(64, 1, 21, 3),  # 64 frames, 21 joints, 3D coordinates
-        'rgb_frames': (64, 3, 480, 640),  # 64 frames, RGB images of size 480x640
+        # 'rgb_frames': (64, 3, 480, 640),  # 64 frames, RGB images of size 480x640
+        'video_name': (1,),  # single video name
+        'mask': (64,),  # mask for valid frames
     }
-
     str_dt = h5py.string_dtype('utf-8', None)
     dtypes = {
         # 'index': 'i4',
@@ -390,7 +498,9 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
         'extrinsics':'f4',
         'mano_poses':'f4',
         'mano_joint_3d':'f4',
-        'rgb_frames':'f4',
+        # 'rgb_frames':'f4',
+        'video_name': str_dt,
+        'mask':'i1',
     }
 
     # breakpoint()  # Debugging breakpoint to inspect the datasets
@@ -405,9 +515,13 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
     # breakpoint()
 
     rgb_format = "color_{:06d}.jpg"
+    video_todo = []
 
+    video_root = "/public/datasets/handdata/dexycb/videos_v4"
+    os.makedirs(video_root, exist_ok=True)
     with h5py.File(hdf5_path, 'w') as f:
-        for split in ['train', 'val', 'test']:
+        for split in ['test','train', 'val' ]:
+            os.makedirs(os.path.join(video_root, split), exist_ok=True)
             print(f"Saving split '{split}' to {hdf5_path}...")
             N = len(datasets[split])
             grp = f.create_group(split)              
@@ -434,8 +548,8 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
 
                 poses_list = []
                 joints_list = []
-                img_list = []
-                for i in range(sample['start_frame'], sample['start_frame'] + 64):
+                # img_list = []
+                for i in range(sample['start_frame'], sample['start_frame'] + sample['seq_len']):
                     mano_labels_file = os.path.join(sample['data_dir'], f'labels_{i:06d}.npz')
                     # mano_joint_file = os.path.join(sample['data_dir'], 'mano_joints', f'joints_{i:06d}.npy')
                     label = np.load(mano_labels_file)
@@ -445,26 +559,44 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
                     assert mano_joint.shape == (1,21, 3), f"Expected mano_joint shape (21, 3), got {mano_joint.shape}"
                     poses_list.append(mano_pose)
                     joints_list.append(mano_joint)
-                    img_path = os.path.join(sample['data_dir'], rgb_format.format(i))
-                    rgb_img = iio.imread(img_path)
-                    img_list.append(rgb_img)
+                    # img_path = os.path.join(sample['data_dir'], rgb_format.format(i))
+                    # rgb_img = iio.imread(img_path)
+                    # img_list.append(rgb_img)
 
-                ds_rgb_frames = grp['rgb_frames']
-                ds_rgb_frames[idx] = np.array(img_list).transpose(0,3,1,2)
+                # ds_rgb_frames = grp['rgb_frames']
+                # ds_rgb_frames[idx] = np.array(img_list).transpose(0,3,1,2)
 
+                ds_video_name = grp['video_name']
+                video_name = sample['video_name']
+                ds_video_name[idx] = video_name
+                video_todo.append((split,sample['data_dir'],sample['start_frame'],sample['seq_len'],video_name))
                 # Write poses
                 ds_mano_poses = grp['mano_poses']
                 np_pose = np.array(poses_list)
+
                 pose_45_batch=torch.Tensor(np_pose[:,0,3:48])
                 if sample['mano_side'] == 'left':
                     pose_45 = pca_coeffs_to_axis45(pose_45_batch, mano_layer_pca_coeff_left)
                 else:
                     pose_45 = pca_coeffs_to_axis45(pose_45_batch, mano_layer_pca_coeff_right)
                 np_pose[:,0,3:48] = pose_45.numpy()
+                np_joints = np.array(joints_list)
+
+                mask_np = np.ones((sample['seq_len']), dtype=np.uint8)
+                if sample['seq_len'] < 64:
+                    pad_len = 64 - sample['seq_len']
+                    pad_np = np.zeros((pad_len, 1, 51), dtype=np.float32)
+                    np_pose = np.concatenate([np_pose, pad_np], axis=0)
+                    pad_np = np.zeros((pad_len, 1, 21, 3), dtype=np.float32)
+                    np_joints = np.concatenate([np_joints, pad_np], axis=0)
+                    mask_pad = np.zeros((pad_len,), dtype=np.uint8)
+                    mask_np = np.concatenate([mask_np, mask_pad], axis=0)
+
+
                 ds_mano_poses[idx] = np_pose
 
                 ds_mano_joint_3d = grp['mano_joint_3d']
-                ds_mano_joint_3d[idx] = np.array(joints_list)
+                ds_mano_joint_3d[idx] = np_joints
 
                 # Write intrinsics
                 ds_intrinsics = grp['intrinsics']
@@ -482,11 +614,16 @@ def save_splits2hdf5(hdf5_path = '', compression: str = 'gzip'):
                 ds_extrinsics = grp['extrinsics']
                 ds_extrinsics[idx] = sample['extrinsics']
 
+                ds_mask = grp['mask']
+                ds_mask[idx] = mask_np
 
+    import multiprocessing as mp
+    with mp.Pool(processes=64) as pool:
+        list(tqdm.tqdm(pool.imap(write_videos, video_todo), total=len(video_todo), desc="Writing videos"))
 
 if __name__ == "__main__":
     save_splits2hdf5(
-        hdf5_path="/public/datasets/handdata/dexycb_v2.hdf5",
+        hdf5_path="/public/datasets/handdata/dexycb_v5.hdf5",
         compression='gzip'
     )
     print("HDF5 file created successfully.")
