@@ -101,7 +101,7 @@ class TrainingLossComputer:
         rel_palm_pose = train_batch.mano_pose[:,:,48:]
         x_0_packed = x_0.pack(using_mat=using_mat)
         device = x_0_packed.device
-        assert x_0_packed.shape == (batch, time, model.get_d_state())
+        assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
 
         # Diffuse.
         t = torch.randint(
