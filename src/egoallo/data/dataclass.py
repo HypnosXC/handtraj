@@ -39,6 +39,8 @@ class HandTrainingData(TensorDataclass):
     mano_side: Float[Tensor, "*#batch 1"]
     """Side of the hand, either 0->'left' or 1->'right'."""
 
+    img_feature: Float[Tensor, "*#batch timesteps 1280"]
+
 
 class EgoTrainingData(TensorDataclass):
     """Dictionary of tensors we use for EgoAllo training."""

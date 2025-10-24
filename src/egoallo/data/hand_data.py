@@ -128,6 +128,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         if dataset_name=="dexycb":
             self._hdf5_path = "/public/datasets/handdata/dexycb_v5.hdf5"
             self.video_root = "/public/datasets/handdata/dexycb/videos_v4"
+            self.img_feat_root = "/public/datasets/handdata/dexycb/img_feats"
         elif dataset_name=="interhand26m":
             self._hdf5_path = "/public/datasets/handdata/interhand26m_v3.hdf5"
             self.video_root = "/public/datasets/handdata/interhand26m/data/picked_videos"
@@ -161,7 +162,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         #     mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
         # )
         
-    def __getitem__(self, index: int) -> HandTrainingData:
+    def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         kwargs: dict[str, Any] = {}
 
         with h5py.File(self._hdf5_path, "r") as f:
@@ -198,11 +199,24 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     if len(rgb_frames) < timesteps:
                         rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * (timesteps - len(rgb_frames)))
                     kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
+
                 else:
                     raise ValueError("No rgb_frames or video_name in test dataset")
+                # resize
+                if resize is not None:
+                    resized_frames = []
+                    for i in range(kwargs["rgb_frames"].shape[0]):
+                        frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
+                        frame_resized = cv2.resize(frame, resize)
+                        resized_frames.append(torch.from_numpy(frame_resized))
+                    kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
             else:
                 kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
             # if no mask in dataset, set mask to all ones
+            kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
+            if kwargs['img_feature'].shape[0] < timesteps:
+                pad_len = timesteps - kwargs['img_feature'].shape[0]
+                kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
@@ -364,8 +378,8 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
         )
 
-    def __getitem__(self, index: int) -> HandTrainingData:
-        return self.dataset[index]
+    def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
+        return self.dataset.__getitem__(index, resize=resize)
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -402,7 +416,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         
     def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
         os.makedirs(out_dir, exist_ok=True)
-        sample = self.__getitem__(index)
+        sample = self.__getitem__(index, resize=None)
         intrinsics = sample.intrinsics.numpy()
         border_color = [255, 0, 0]
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
@@ -426,7 +440,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
         os.makedirs(out_dir, exist_ok=True)
         vertices = self.get_vertices_faces(index)
-        sample = self.__getitem__(index)
+        sample = self.__getitem__(index, resize=None)
         
         faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
         intrinsics = sample.intrinsics.numpy()
@@ -458,13 +472,19 @@ if __name__ == "__main__":
     # print(f"Dataset length: {len(dataset)}")
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
 
-    for split in ['test','train','val']:
-        for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
-            dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name)
-            for i in tqdm(range(len(dataset))):
-                sample = dataset[i]
-                # assert sample.mano_betas not all zero
-                assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
+    # for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
+    for dataset_name in ['dexycb']:
+        # for split in ['test','train','val']:
+        split='train'
+        img_shape = set()
+        dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=True)
+        for i in tqdm(range(100)):
+            sample = dataset[i]
+            breakpoint()
+            img_shape.add(sample.rgb_frames.shape[1:3])
+        print(f"Dataset: {dataset_name}, Image shapes: {img_shape}")
+            # assert sample.mano_betas not all zero
+            # assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
 
     # joint_3d_calculated = mano_poses2joints_3d(
     #     mano_pose=sample.mano_pose,
