@@ -213,10 +213,14 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
             # if no mask in dataset, set mask to all ones
-            kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
-            if kwargs['img_feature'].shape[0] < timesteps:
-                pad_len = timesteps - kwargs['img_feature'].shape[0]
-                kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
+            # if we have set self.img_feat_root
+            if hasattr(self, 'img_feat_root'):
+                kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
+                if kwargs['img_feature'].shape[0] < timesteps:
+                    pad_len = timesteps - kwargs['img_feature'].shape[0]
+                    kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
+                else:
+                    kwargs['img_feature'] = torch.zeros((timesteps, 1280))
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
