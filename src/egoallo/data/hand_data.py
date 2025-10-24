@@ -219,8 +219,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 if kwargs['img_feature'].shape[0] < timesteps:
                     pad_len = timesteps - kwargs['img_feature'].shape[0]
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
-                else:
-                    kwargs['img_feature'] = torch.zeros((timesteps, 1280))
+            else:
+                kwargs['img_feature'] = torch.zeros((timesteps, 1280))
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
