@@ -214,7 +214,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
             # if no mask in dataset, set mask to all ones
             # if we have set self.img_feat_root
-            if hasattr(self, 'img_feat_root'):
+            if hasattr(self, 'img_feat_root') and os.path.exists(os.path.join(self.img_feat_root, self.split)):
                 kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
                 if kwargs['img_feature'].shape[0] < timesteps:
                     pad_len = timesteps - kwargs['img_feature'].shape[0]
@@ -383,7 +383,11 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         )
 
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
-        return self.dataset.__getitem__(index, resize=resize)
+        for ds in self.dataset.datasets:
+            if index < len(ds):
+                return ds.__getitem__(index,resize=resize)
+            else:
+                index -= len(ds)
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -477,13 +481,13 @@ if __name__ == "__main__":
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
 
     # for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
-    for dataset_name in ['dexycb']:
+    for dataset_name in ['all']:
         # for split in ['test','train','val']:
         split='train'
         img_shape = set()
         dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=True)
         for i in tqdm(range(100)):
-            sample = dataset[i]
+            sample = dataset.__getitem__(i, resize=None)
             breakpoint()
             img_shape.add(sample.rgb_frames.shape[1:3])
         print(f"Dataset: {dataset_name}, Image shapes: {img_shape}")
