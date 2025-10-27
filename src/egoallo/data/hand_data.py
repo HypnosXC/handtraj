@@ -205,6 +205,11 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 # resize
                 if resize is not None:
                     resized_frames = []
+                    intrinsics = kwargs["intrinsics"].clone()
+                    kwargs["intrinsics"][0] = intrinsics[0] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    kwargs["intrinsics"][1] = intrinsics[1] * resize[1] / kwargs["rgb_frames"].shape[1]
+                    kwargs["intrinsics"][2] = intrinsics[2] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    kwargs["intrinsics"][3] = intrinsics[3] * resize[1] / kwargs["rgb_frames"].shape[1]
                     for i in range(kwargs["rgb_frames"].shape[0]):
                         frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
                         frame_resized = cv2.resize(frame, resize)
@@ -423,9 +428,9 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             print("Error: mano_side should be 'left' or 'right'")
             return None
         
-    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
+    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
-        sample = self.__getitem__(index, resize=None)
+        sample = self.__getitem__(index, resize=resize)
         intrinsics = sample.intrinsics.numpy()
         border_color = [255, 0, 0]
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
@@ -446,10 +451,10 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             out.write(composited)
         out.release()
 
-    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
         vertices = self.get_vertices_faces(index)
-        sample = self.__getitem__(index, resize=None)
+        sample = self.__getitem__(index, resize=resize)
         
         faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
         intrinsics = sample.intrinsics.numpy()
