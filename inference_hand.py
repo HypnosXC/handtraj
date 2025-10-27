@@ -166,7 +166,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/my_hand_training/v7/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path =Path("./experiments/hand_train_cond_img/v2/checkpoints_25000/") # Path("./experiments/my_hand_training/v7/checkpoints_300000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -214,126 +214,205 @@ def inference_and_visualize(
     )
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
     if using_img_feat:
-        cond_feat = train_batch.img_feature
+        cond_feat = train_batch.img_feature.to(device)
     else:
         cond_feat = None
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
-
-    window_size = 64
-    overlap_size = 32
-    canonical_overlap_weights = (
-        torch.from_numpy(
-            np.minimum(
-                # Make this shape /```\
-                overlap_size,
+    if seq_len > 64:
+        window_size = 64
+        overlap_size = 32
+        canonical_overlap_weights = (
+            torch.from_numpy(
                 np.minimum(
-                    # Make this shape: /
-                    np.arange(1, seq_len + 1),
-                    # Make this shape: \
-                    np.arange(1, seq_len + 1)[::-1],
-                ),
-            )
-            / overlap_size,
-        )
-        .to(device)
-        .to(torch.float32)
-    )
-    ts = quadratic_ts()
-
-    for i in tqdm(range(len(ts) - 1)):
-        print(f"Sampling {i}/{len(ts) - 1}")
-        t = ts[i]
-        t_next = ts[i + 1]
-
-        with torch.inference_mode():
-            # Chop everything into windows.
-            x_0_packed_pred = torch.zeros_like(x_t_packed)
-            overlap_weights = torch.zeros((batch, seq_len, 1), device=x_t_packed.device)
-
-            # Denoise each window.
-            for start_t in range(0, seq_len, window_size - overlap_size):
-                end_t = min(start_t + window_size, seq_len)
-                assert end_t - start_t > 0
-                overlap_weights_slice = canonical_overlap_weights[
-                    None, : end_t - start_t, None
-                ]
-                overlap_weights[:, start_t:end_t, :] += overlap_weights_slice
-                conds = hand_network.HandDenoiseTraj(
-                                                    mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
-                                                    mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
-                                                    global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
-                                                    global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
-                                                    mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
-                                                    ).to(device)
-                x_0_packed_pred[:, start_t:end_t, :] += (
-                    denoiser_network.forward(
-                        x_t_packed[:, start_t:end_t, :],
-                        torch.tensor([t], device=device).expand((batch,)),
-                        rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
-                        project_output_rotmats=False,
-                        conds=conds,
-                        img_feat=cond_feat,
-                        mask=None,
-                    )* overlap_weights_slice
+                    # Make this shape /```\
+                    overlap_size,
+                    np.minimum(
+                        # Make this shape: /
+                        np.arange(1, seq_len + 1),
+                        # Make this shape: \
+                        np.arange(1, seq_len + 1)[::-1],
+                    ),
                 )
+                / overlap_size,
+            )
+            .to(device)
+            .to(torch.float32)
+        )
+        ts = quadratic_ts()
 
-            # Take the mean for overlapping regions.
-            x_0_packed_pred /= overlap_weights
+        for i in tqdm(range(len(ts) - 1)):
+            print(f"Sampling {i}/{len(ts) - 1}")
+            t = ts[i]
+            t_next = ts[i + 1]
+
+            with torch.inference_mode():
+                # Chop everything into windows.
+                x_0_packed_pred = torch.zeros_like(x_t_packed)
+                overlap_weights = torch.zeros((batch, seq_len, 1), device=x_t_packed.device)
+
+                # Denoise each window.
+                for start_t in range(0, seq_len, window_size - overlap_size):
+                    end_t = min(start_t + window_size, seq_len)
+                    assert end_t - start_t > 0
+                    overlap_weights_slice = canonical_overlap_weights[
+                        None, : end_t - start_t, None
+                    ]
+                    overlap_weights[:, start_t:end_t, :] += overlap_weights_slice
+                    conds = hand_network.HandDenoiseTraj(
+                                                        mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
+                                                        mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
+                                                        global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
+                                                        global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
+                                                        mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
+                                                        ).to(device)
+                    x_0_packed_pred[:, start_t:end_t, :] += (
+                        denoiser_network.forward(
+                            x_t_packed[:, start_t:end_t, :],
+                            torch.tensor([t], device=device).expand((batch,)),
+                            rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
+                            project_output_rotmats=False,
+                            conds=conds,
+                            img_feat=cond_feat,
+                            mask=None,
+                        )* overlap_weights_slice
+                    )
+
+                # Take the mean for overlapping regions.
+                x_0_packed_pred /= overlap_weights
+
+                x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0_packed.mano_side).pack(using_mat=using_mat)
+
+            if torch.any(torch.isnan(x_0_packed_pred)):
+                print("found nan", i)
+            sigma_t = torch.cat(
+                [
+                    torch.zeros((1,), device=device),
+                    torch.sqrt(
+                        (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+                    )
+                    * 0.8,
+                ]
+            )
+
+            """ if guidance_mode != "off" and guidance_inner:
+                x_0_pred, _ = do_guidance_optimization(
+                    It's important that we _don't_ use the shifted transforms here.
+                    Ts_world_cpf=Ts_world_cpf[1:, :],
+                    traj=network.EgoDenoiseTraj.unpack(
+                        x_0_packed_pred, include_hands=denoiser_network.config.include_hands
+                    ),
+                    body_model=body_model,
+                    guidance_mode=guidance_mode,
+                    phase="inner",
+                    
+                    hamer_detections=hamer_detections,
+                    aria_detections=aria_detections,
+                    verbose=guidance_verbose,
+                )
+                x_0_packed_pred = x_0_pred.pack()
+                del x_0_pred
+            """
+            if start_time is None:
+                start_time = time.time()
+
+            # print(sigma_t)
+            x_t_packed = (
+                torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
+                + (
+                    torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
+                    * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
+                    / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+                )
+                + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
+            )
+            x_t_list.append(
+                hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
+            )
+
+            assert start_time is not None
+            print("RUNTIME (exclude first optimization)", time.time() - start_time)
+    else:
+        ts = quadratic_ts()
+        for i in tqdm(range(len(ts) - 1)):
+            print(f"Sampling {i}/{len(ts) - 1}")
+            t = ts[i]
+            t_next = ts[i + 1]
+
+            with torch.inference_mode():
+                # Chop everything into windows.
+                x_0_packed_pred = torch.zeros_like(x_t_packed)
+                conds = hand_network.HandDenoiseTraj(
+                                                    mano_betas=x_0_packed.mano_betas,
+                                                    mano_poses=x_0_packed.mano_poses,
+                                                    global_orientation=x_0_packed.global_orientation,
+                                                    global_translation=x_0_packed.global_translation,
+                                                    mano_side=x_0_packed.mano_side,
+                                                    ).to(device)
+                x_0_packed_pred = denoiser_network.forward(
+                                                            x_t_packed,
+                                                            torch.tensor([t], device=device).expand((batch,)),
+                                                            rel_palm_pose=rel_palm_pose,
+                                                            project_output_rotmats=False,
+                                                            conds=conds,
+                                                            img_feat=cond_feat,
+                                                            mask=None,
+                                                        )
 
             x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0_packed.mano_side).pack(using_mat=using_mat)
 
-        if torch.any(torch.isnan(x_0_packed_pred)):
-            print("found nan", i)
-        sigma_t = torch.cat(
-            [
-                torch.zeros((1,), device=device),
-                torch.sqrt(
-                    (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+            if torch.any(torch.isnan(x_0_packed_pred)):
+                print("found nan", i)
+            sigma_t = torch.cat(
+                [
+                    torch.zeros((1,), device=device),
+                    torch.sqrt(
+                        (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+                    )
+                    * 0.8,
+                ]
+            )
+
+            """ if guidance_mode != "off" and guidance_inner:
+                x_0_pred, _ = do_guidance_optimization(
+                    It's important that we _don't_ use the shifted transforms here.
+                    Ts_world_cpf=Ts_world_cpf[1:, :],
+                    traj=network.EgoDenoiseTraj.unpack(
+                        x_0_packed_pred, include_hands=denoiser_network.config.include_hands
+                    ),
+                    body_model=body_model,
+                    guidance_mode=guidance_mode,
+                    phase="inner",
+                    
+                    hamer_detections=hamer_detections,
+                    aria_detections=aria_detections,
+                    verbose=guidance_verbose,
                 )
-                * 0.8,
-            ]
-        )
+                x_0_packed_pred = x_0_pred.pack()
+                del x_0_pred
+            """
+            if start_time is None:
+                start_time = time.time()
 
-        """ if guidance_mode != "off" and guidance_inner:
-            x_0_pred, _ = do_guidance_optimization(
-                It's important that we _don't_ use the shifted transforms here.
-                Ts_world_cpf=Ts_world_cpf[1:, :],
-                traj=network.EgoDenoiseTraj.unpack(
-                    x_0_packed_pred, include_hands=denoiser_network.config.include_hands
-                ),
-                body_model=body_model,
-                guidance_mode=guidance_mode,
-                phase="inner",
-                
-                hamer_detections=hamer_detections,
-                aria_detections=aria_detections,
-                verbose=guidance_verbose,
+            # print(sigma_t)
+            x_t_packed = (
+                torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
+                + (
+                    torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
+                    * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
+                    / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+                )
+                + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
             )
-            x_0_packed_pred = x_0_pred.pack()
-            del x_0_pred
-        """
-        if start_time is None:
-            start_time = time.time()
-
-        # print(sigma_t)
-        x_t_packed = (
-            torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
-            + (
-                torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
-                * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
-                / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+            x_t_list.append(
+                hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
             )
-            + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
-        )
-        x_t_list.append(
-            hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
-        )
 
-        assert start_time is not None
-        print("RUNTIME (exclude first optimization)", time.time() - start_time)
+            assert start_time is not None
+            print("RUNTIME (exclude first optimization)", time.time() - start_time)
     traj = x_t_list[-1]
+    
     ## Assume we have gt global trans/orientation
     traj.global_translation = x_0_packed.global_translation.to(device)
     traj.global_orientation = x_0_packed.global_orientation.to(device)
@@ -360,7 +439,7 @@ def main(args: Args) -> None:
         errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"global_translation":0}
         joint_errors = 0
         from hamer_helper import HamerHelper
-        hamer_helper = HamerHelper()        
+        hamer_helper = HamerHelper()   
         for i in range(N):
             print("processed at index ", i)
             sample = [dataset.__getitem__(i,resize=None).to(device)] 
@@ -369,6 +448,9 @@ def main(args: Args) -> None:
             skip_cam = -1
             subseq_len = gt.mano_pose.shape[1]
             hamer_out = []
+            mask = gt.mask
+            subseq_len = min(mask.sum().cpu().numpy(),subseq_len)
+            print("Meet index ",i," video len ", subseq_len)
             for j in range(subseq_len):
                 feat = hamer_helper.get_img_feats(
                 sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),

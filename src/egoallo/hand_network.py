@@ -193,8 +193,8 @@ class HandDenoiserConfig:
     encoder_layers: int = 6
     decoder_layers: int = 6
     dropout_p: float = 0.0
-    using_mat: bool = False
-    using_img_feat: bool = False
+    using_mat: bool = True
+    using_img_feat: bool = True
     activation: Literal["gelu", "relu"] = "gelu"
 
     positional_encoding: Literal["transformer", "rope"] = "rope"
