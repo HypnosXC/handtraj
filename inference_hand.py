@@ -23,7 +23,7 @@ from egoallo.inference_utils import load_hand_denoiser
 from egoallo.data.dataclass import HandTrainingData
 from hamer.utils.mesh_renderer import create_raymond_lights
 from egoallo.data.hand_data import HandHdf5Dataset
-from egoallo import network, hand_network
+from src.egoallo import network, hand_network
 # from PIL import Image
 import time    
 from manopth.manolayer import ManoLayer
@@ -166,7 +166,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("./experiments/hand_train_cond_wrist_motion_more_data/v0/checkpoints_290000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
+    checkpoint_dir: Path = Path("./experiments/my_hand_training/v7/checkpoints_300000/")#Path("./egoallo_checkpoint_april13/checkpoints_3000000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -204,6 +204,7 @@ def inference_and_visualize(
     train_batch.to(device)
     print(denoiser_network)
     using_mat = denoiser_network.config.using_mat
+    using_img_feat = denoiser_network.config.using_img_feat
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
         mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
@@ -212,7 +213,10 @@ def inference_and_visualize(
         mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
     )
     rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
-
+    if using_img_feat:
+        cond_feat = train_batch.img_feature
+    else:
+        cond_feat = None
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
@@ -261,7 +265,7 @@ def inference_and_visualize(
                                                     mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
                                                     global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
                                                     global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
-                                                    mano_side=x_0_packed.mano_side,
+                                                    mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
                                                     ).to(device)
                 x_0_packed_pred[:, start_t:end_t, :] += (
                     denoiser_network.forward(
@@ -270,6 +274,7 @@ def inference_and_visualize(
                         rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
                         project_output_rotmats=False,
                         conds=conds,
+                        img_feat=cond_feat,
                         mask=None,
                     )* overlap_weights_slice
                 )
@@ -277,7 +282,7 @@ def inference_and_visualize(
             # Take the mean for overlapping regions.
             x_0_packed_pred /= overlap_weights
 
-            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat).pack(using_mat=using_mat)
+            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0_packed.mano_side).pack(using_mat=using_mat)
 
         if torch.any(torch.isnan(x_0_packed_pred)):
             print("found nan", i)
@@ -323,7 +328,7 @@ def inference_and_visualize(
             + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
         )
         x_t_list.append(
-            hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat)
+            hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
         )
 
         assert start_time is not None
@@ -358,7 +363,7 @@ def main(args: Args) -> None:
         hamer_helper = HamerHelper()        
         for i in range(N):
             print("processed at index ", i)
-            sample = [dataset.__getitem__(i).to(device)] 
+            sample = [dataset.__getitem__(i,resize=None).to(device)] 
             keys = vars(sample[0]).keys()
             gt = type(sample[0])(**{k: torch.stack([getattr(b, k) for b in sample]) for k in keys})
             skip_cam = -1
@@ -444,9 +449,9 @@ def main(args: Args) -> None:
         if visualized == True:
             num_samples = 1
             for i in range(num_samples):
-                data_id = 829# random.randint(1,1000)
+                data_id = random.randint(1,len(dataset))
                 rand_id = data_id
-                sample = dataset.__getitem__(data_id)
+                sample = dataset.__getitem__(data_id,resize=None)
                 train_batch.append(sample)
             keys = vars(train_batch[0]).keys()
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
@@ -467,7 +472,7 @@ def main(args: Args) -> None:
             errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0}
             total_size = 0
             dataloader = torch.utils.data.DataLoader(dataset, 
-                                                    batch_size=64,
+                                                    batch_size=256,
                                                     shuffle=False,
                                                     num_workers=2,
                                                     pin_memory=True,
@@ -489,9 +494,7 @@ def main(args: Args) -> None:
                 for var in errors.keys():
                     if var  != "3D_joints":
                         err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1)
-                        print("err shape",err.shape, " and mask shape", loss_mask.shape)
                         if len(err.shape)>2:
-                            print("err shape",err.shape, " and mask shape", loss_mask.shape)
                             err = err.sum(dim=-1)
                         errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy()
                     else:#MJPE
@@ -508,3 +511,4 @@ def main(args: Args) -> None:
 if __name__ == "__main__":
     import tyro
     main(tyro.cli(Args))
+

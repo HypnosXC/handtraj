@@ -156,6 +156,10 @@ class EgoTrainingData(TensorDataclass):
 def collate_dataclass[T](batch: list[T]) -> T:
     """Collate function that works for dataclasses."""
     keys = vars(batch[0]).keys()
+    for k in keys:
+        for b in batch:
+            if getattr(b, k).device != batch[0].mano_betas.device:
+                print("wrong device for:", k, " ",getattr(b, k).device)
     return type(batch[0])(
         **{k: torch.stack([getattr(b, k) for b in batch]) for k in keys}
     )

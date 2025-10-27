@@ -221,6 +221,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
             else:
                 kwargs['img_feature'] = torch.zeros((timesteps, 1280))
+            kwargs['img_feature'] = kwargs['img_feature'].cpu()
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
@@ -365,7 +366,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         
             self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         else:
-            self.dataset = HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)
+            self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)])
         
         self.left_mano_layer = ManoLayer(
             use_pca=False,

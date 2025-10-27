@@ -45,7 +45,7 @@ def load_hand_denoiser(checkpoint_dir: Path) -> HandDenoiser:
     config = yaml.load(
         (experiment_dir / "model_config.yaml").read_text(), Loader=yaml.Loader
     )
-    assert isinstance(config, HandDenoiserConfig)
+    # assert isinstance(config, HandDenoiserConfig)
 
     model = HandDenoiser(config)
     with safe_open(checkpoint_dir / "model.safetensors", framework="pt") as f:  # type: ignore

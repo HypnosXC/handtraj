@@ -68,6 +68,7 @@ def run_training(
     config: HandTrainConfig,
     restore_checkpoint_dir: Path | None = None,
 ) -> None:
+    torch.multiprocessing.set_start_method('spawn')
     # Initialize Accelerator for multi-GPU support
     accelerator = Accelerator(
         project_config=ProjectConfiguration(
@@ -131,7 +132,7 @@ def run_training(
         # cache_files=True,
         # slice_strategy=config.dataset_slice_strategy,
         # random_variable_len_proportion=config.dataset_slice_random_variable_len_proportion,
-        # dataset_name='dexycb',
+        dataset_name='dexycb',
         # vis=True
     )
     
@@ -168,8 +169,8 @@ def run_training(
     # restore_checkpoint_dir = (Path(__file__).absolute().parent
     #     / "experiments"
     #     / config.experiment_name
-    #     / "v1"
-    #     / "checkpoints_580000")
+    #     / "v7"
+    #     / "checkpoints_300000")
     if restore_checkpoint_dir is not None:
         accelerator.load_state(str(restore_checkpoint_dir))
 
@@ -189,11 +190,6 @@ def run_training(
     loop_metrics_gen = training_utils.loop_metric_generator(counter_init=step)
     prev_checkpoint_path: Path | None = None
     error_cnt = 0
-    if model_config.using_img_feat:
-        from hamer_helper import HamerHelper
-        hamer_helper = HamerHelper()
-    else:
-        hamer_helper = None
 
     # Training loop
     while True:
@@ -209,7 +205,6 @@ def run_training(
                     train_batch=train_batch,
                     using_mat=model_config.using_mat,
                     using_img_feat=model_config.using_img_feat,
-                    hamer_helper=hamer_helper
                 )
 
                 if torch.isnan(loss).any():
