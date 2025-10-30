@@ -17,7 +17,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
 from egoallo.data.dataclass import HandTrainingData
-from hamer.utils.mesh_renderer import create_raymond_lights
+# from hamer.utils.mesh_renderer import create_raymond_lights
+def create_raymond_lights():
+    # import pyrender
+    thetas = np.pi * np.array([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0])
+    phis = np.pi * np.array([0.0, 2.0 / 3.0, 4.0 / 3.0])
+
+    nodes = []
+
+    for phi, theta in zip(phis, thetas):
+        xp = np.sin(theta) * np.cos(phi)
+        yp = np.sin(theta) * np.sin(phi)
+        zp = np.cos(theta)
+
+        z = np.array([xp, yp, zp])
+        z = z / np.linalg.norm(z)
+        x = np.array([-z[1], z[0], 0.0])
+        if np.linalg.norm(x) == 0:
+            x = np.array([1.0, 0.0, 0.0])
+        x = x / np.linalg.norm(x)
+        y = np.cross(z, x)
+
+        matrix = np.eye(4)
+        matrix[:3,:3] = np.c_[x,y,z]
+        nodes.append(pyrender.Node(
+            light=pyrender.DirectionalLight(color=np.ones(3), intensity=1.0),
+            matrix=matrix
+        ))
+
+    return nodes
+
 # from PIL import Image
 import time
 from manopth.manolayer import ManoLayer
@@ -108,7 +137,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 
     def __init__(
         self,
-        dataset_name: str = "dexycb", # dexycb, interhand26m, arctic
+        dataset_name: str = "dexycb", # dexycb, interhand26m, arctic, ho3d
         # hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5", # 
         split: Literal["train", "val", "test"] = "train",
         vis: bool = False,
@@ -135,8 +164,12 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         elif dataset_name=="arctic":
             self._hdf5_path = "/public/datasets/handdata/arctic_v3.hdf5"
             self.video_root = "/public/datasets/handdata/arctic/picked_videos"
+        elif dataset_name == "ho3d":
+            self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
+            self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
+            self.split="train"
         else:
-            raise ValueError("dataset_name should be dexycb, interhand26m or arctic")
+            raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
         # self.rgb_format = "color_{:06d}.jpg"
         self.split = split
         self.dataset_name = dataset_name
@@ -205,6 +238,11 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 # resize
                 if resize is not None:
                     resized_frames = []
+                    intrinsics = kwargs["intrinsics"].clone()
+                    kwargs["intrinsics"][0] = intrinsics[0] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    kwargs["intrinsics"][1] = intrinsics[1] * resize[1] / kwargs["rgb_frames"].shape[1]
+                    kwargs["intrinsics"][2] = intrinsics[2] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    kwargs["intrinsics"][3] = intrinsics[3] * resize[1] / kwargs["rgb_frames"].shape[1]
                     for i in range(kwargs["rgb_frames"].shape[0]):
                         frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
                         frame_resized = cv2.resize(frame, resize)
@@ -269,93 +307,13 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         print(f"Hamer output time: {time.time() - start_time:.2f} seconds")
         return hamer_output_seq
     
-    # def get_vertices_faces(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-    #     sample = self.__getitem__(index)
-    #     if sample.mano_side.item() == 0:
-    #         vertices, joints = self.left_mano_layer(
-    #             sample.mano_pose[:,:48],
-    #             sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-    #             sample.mano_pose[:,48:51]
-    #         )
-    #     elif sample.mano_side.item() == 1:
-    #         vertices, joints = self.right_mano_layer(
-    #             sample.mano_pose[:,:48],
-    #             sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-    #             sample.mano_pose[:,48:51]
-    #         )
-    #     else:
-    #         print("Error: mano_side should be 0 or 1")
-    #         return None
-    #     vertices = vertices/ 1000  # Convert to meters
-        
-    #     return vertices
-    
-    # def get_mano_faces(self,mano_side='left'):
-    #     if mano_side=='right':
-    #         return self.right_mano_layer.th_faces
-    #     elif mano_side=='left':
-    #         return self.left_mano_layer.th_faces
-    #     else:
-    #         print("Error: mano_side should be 'left' or 'right'")
-    #         return None
-        
-    # def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
-    #     os.makedirs(out_dir, exist_ok=True)
-    #     sample = self.__getitem__(index)
-    #     intrinsics = sample.intrinsics.numpy()
-    #     border_color = [255, 0, 0]
-    #     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
-    #     out = cv2.VideoWriter(out_dir+"/gt_joints.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
-    #     projected_joints = np.zeros((sample.mano_joint_3d.shape[0],sample.mano_joint_3d.shape[1], 2))
-    #     projected_joints[...,0] = intrinsics[0] * (sample.mano_joint_3d[...,0] / sample.mano_joint_3d[...,2]) + intrinsics[2]
-    #     projected_joints[...,1] = intrinsics[1] * (sample.mano_joint_3d[...,1] / sample.mano_joint_3d[...,2]) + intrinsics[3]
-    #     for i in tqdm(range(sample.mask.sum().item())):
-    #         image = sample.rgb_frames[i].numpy().astype(np.uint8)
-    #         image = image[:,:,::-1]
-    #         composited = image.copy()
-    #                 # sample.mano_joint_3d # (batch, timesteps, 21, 3)
-    #                 # to(batch, timesteps, 21, 3)
-    #         for j in range(projected_joints.shape[1]):
-    #             cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, border_color, -1)
-    #         composited = np.concatenate([image, composited], axis=1)
-    #         #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
-    #         out.write(composited)
-    #     out.release()
-
-    # def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
-    #     os.makedirs(out_dir, exist_ok=True)
-    #     vertices = self.get_vertices_faces(index)
-    #     faces = self.get_mano_faces()
-    #     sample = self.__getitem__(index)
-    #     intrinsics = sample.intrinsics.numpy()
-    #     border_color = [255, 0, 0]
-    #     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
-    #     out = cv2.VideoWriter(out_dir+"/gt.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
-    #     for i in range(sample.mask.sum().item()):
-    #         image = sample.rgb_frames[i].numpy().astype(np.uint8)
-    #         image = image[:,:,::-1]
-    #         render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
-    #                                                            intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
-    #         border_width = 10
-    #         composited = np.where(
-    #             binary_dilation(
-    #                 render_mask, np.ones((border_width, border_width), dtype=bool)
-    #             )[:, :, None],
-    #             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-    #             image,
-    #         )
-    #         composited = np.where(render_mask[:, :, None], render_rgb, image)
-    #         composited = np.concatenate([image, composited], axis=1)
-    #         #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
-    #         out.write(composited)
-    #     out.release()
 
 from torch.utils.data import ConcatDataset
 
 class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
     # to a single dataset
-    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m"] = 'all', vis=False) -> None:
+    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m", "ho3d"] = 'all', vis=False) -> None:
         # if dataset_name is None and split == "test":
         #     dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
         #     self.dataset = dataset_dexycb
@@ -423,9 +381,9 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             print("Error: mano_side should be 'left' or 'right'")
             return None
         
-    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
+    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
-        sample = self.__getitem__(index, resize=None)
+        sample = self.__getitem__(index, resize=resize)
         intrinsics = sample.intrinsics.numpy()
         border_color = [255, 0, 0]
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
@@ -446,10 +404,10 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             out.write(composited)
         out.release()
 
-    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp") -> None:
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
         vertices = self.get_vertices_faces(index)
-        sample = self.__getitem__(index, resize=None)
+        sample = self.__getitem__(index, resize=resize)
         
         faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
         intrinsics = sample.intrinsics.numpy()
@@ -482,16 +440,19 @@ if __name__ == "__main__":
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
 
     # for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
-    for dataset_name in ['all']:
-        # for split in ['test','train','val']:
-        split='train'
-        img_shape = set()
-        dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=True)
-        for i in tqdm(range(100)):
-            sample = dataset.__getitem__(i, resize=None)
-            breakpoint()
-            img_shape.add(sample.rgb_frames.shape[1:3])
-        print(f"Dataset: {dataset_name}, Image shapes: {img_shape}")
+
+    dataset = HandHdf5Dataset(split="train", dataset_name="ho3d", vis=True)
+    dataset.visualize_manos_in_rgb(115, out_dir="tmp",resize=None)
+    # for dataset_name in ['all']:
+    #     # for split in ['test','train','val']:
+    #     split='train'
+    #     img_shape = set()
+    #     dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=True)
+    #     for i in tqdm(range(100)):
+    #         sample = dataset.__getitem__(i, resize=None)
+    #         breakpoint()
+    #         img_shape.add(sample.rgb_frames.shape[1:3])
+    #     print(f"Dataset: {dataset_name}, Image shapes: {img_shape}")
             # assert sample.mano_betas not all zero
             # assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
 
