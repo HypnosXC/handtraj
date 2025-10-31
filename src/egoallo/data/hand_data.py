@@ -14,7 +14,7 @@ os.environ["PYOPENGL_PLATFORM"] = "egl"
 import imageio.v3 as iio
 from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
-from hamer_helper import HamerHelper
+# from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
 from egoallo.data.dataclass import HandTrainingData
 # from hamer.utils.mesh_renderer import create_raymond_lights
@@ -70,6 +70,7 @@ def render_joint(
     material = pyrender.MetallicRoughnessMaterial(
         metallicFactor=0.0, alphaMode="OPAQUE", baseColorFactor=(1.0, 1.0, 0.9, 1.0)
     )
+    # breakpoint()
     mesh = trimesh.Trimesh(vertices.copy(), faces.copy())
     mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
 
@@ -102,24 +103,67 @@ def render_joint(
     mask = color[..., -1] > 0
     return color[..., :3], rend_depth, mask
 
+
+
+
+# from hamer_helper import HamerHelper, HandOutputsWrtCamera
+# helper = HamerHelper()
 # def composite_detections(
 #     image: np.ndarray,
 #     detections: HandOutputsWrtCamera | None,
+#     h,w,
 #     border_color: tuple[int, int, int],
 # ) -> np.ndarray:
-#     render_rgb, _, render_mask = render_detection(
-#         detections, hand_index=0, h=h, w=w, focal_length=None
-#     )
-#     border_width = 15
-#     image = np.where(
-#         binary_dilation(
-#             render_mask, np.ones((border_width, border_width), dtype=bool)
-#         )[:, :, None],
-#         np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-#         image,
-#     )
-#     image = np.where(render_mask[:, :, None], render_rgb, image)
+#     if detections is None:
+#         return image
 
+#     for index in range(detections["verts"].shape[0]):
+#         print(index)
+#         render_rgb, _, render_mask = helper.render_detection(
+#             detections, hand_index=0, h=h, w=w, focal_length=None
+#         )
+#         border_width = 15
+#         image = np.where(
+#             binary_dilation(
+#                 render_mask, np.ones((border_width, border_width), dtype=bool)
+#             )[:, :, None],
+#             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+#             image,
+#         )
+#         image = np.where(render_mask[:, :, None], render_rgb, image)
+
+#     return image
+
+
+# def put_text(
+#     image: np.ndarray,
+#     text: str,
+#     line_number: int,
+#     color: tuple[int, int, int],
+#     font_scale: float = 10.0,
+# ) -> np.ndarray:
+#     image = image.copy()
+#     font = cv2.FONT_HERSHEY_PLAIN  # type: ignore
+#     cv2.putText(  # type: ignore
+#         image,
+#         text=text,
+#         org=(2, 1 + int(15 * font_scale * (line_number + 1))),
+#         fontFace=font,
+#         fontScale=font_scale,
+#         color=(0, 0, 0),
+#         thickness=int(font_scale),
+#         lineType=cv2.LINE_AA,  # type: ignore
+#     )
+#     cv2.putText(  # type: ignore
+#         image,
+#         text=text,
+#         org=(2, 1 + int(15 * font_scale * (line_number + 1))),
+#         fontFace=font,
+#         fontScale=font_scale,
+#         color=color,
+#         thickness=int(font_scale),
+#         lineType=cv2.LINE_AA,  # type: ignore
+#     )
 #     return image
 
 
@@ -165,9 +209,13 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self._hdf5_path = "/public/datasets/handdata/arctic_v3.hdf5"
             self.video_root = "/public/datasets/handdata/arctic/picked_videos"
         elif dataset_name == "ho3d":
-            self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
-            self.split="train"
+            if split == "train":
+                self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
+            elif split == "evaluation":
+                self._hdf5_path = "/public/datasets/handdata/ho3d_v2_evaluation.hdf5"
+            else:
+                raise ValueError("For ho3d, split should be train or evaluation")
         else:
             raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
         # self.rgb_format = "color_{:06d}.jpg"
@@ -201,22 +249,31 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         with h5py.File(self._hdf5_path, "r") as f:
             dataset = f[self.split]
             # ndarray to tensor
-            kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
-            kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
-            timesteps= kwargs["mano_pose"].shape[0]
+            if self.dataset_name=="ho3d" and self.split=="evaluation":
+                kwargs["mano_betas"]=torch.zeros(10)
+                kwargs["mano_pose"]=torch.zeros(64, 51)
+                kwargs["extrinsics"] =torch.eye(3,4)
+
+            else:
+                kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
+                kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
+                kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
+                
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
             if self.dataset_name=="arctic":
                 kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
-            kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
             if dataset['mano_side'][index][0].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
             else:
                 kwargs["mano_side"] = torch.ones(1)
             
             kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
-            assert os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))), f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}"
+            timesteps = kwargs["mask"].sum().item()
+            # assert os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))), f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}"
             # print("Video name: ", dataset['video_name'][index][0].decode('utf-8'))
+            if not os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))):
+                print(f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}")
             if self.vis:
                 if 'rgb_frames' in dataset:
                     kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
@@ -265,48 +322,104 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     def __len__(self) -> int:
         return self.N
     
-    def hamer_output(self,index):
-        sample = self.__getitem__(index)
-        hamer_helper = HamerHelper()
+    # def hamer_output(self,index):
+    #     sample = self.__getitem__(index, resize=None)
+    #     hamer_helper = HamerHelper()
 
-        hamer_output_seq = []
-        print("Start calculating joints from hamer")
-        start_time = time.time()
-        for i in range(self._subseq_len):
-            hamer_out_frame = {}            
-            hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
-                sample.rgb_frames[i].numpy().astype(np.uint8),
-                focal_length=sample.intrinsics[0].item(),
-            )
+    #     hamer_output_seq = []
+    #     print("Start calculating joints from hamer")
+    #     start_time = time.time()
+    #     for i in range(self._subseq_len):
+    #         hamer_out_frame = {}            
+    #         hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
+    #             sample.rgb_frames[i].numpy().astype(np.uint8),
+    #             focal_length=sample.intrinsics[0].item(),
+    #         )
 
-            if hamer_out_left is None:
-                hamer_out_frame["left"] = None
-            else:
-                hamer_out_frame["left"] = {
-                    "verts": hamer_out_left["verts"],
-                    "keypoints_3d": hamer_out_left["keypoints_3d"],
-                    "mano_poses": hamer_out_left["mano_hand_pose"],
-                    "mano_betas": hamer_out_left["mano_hand_betas"],
-                    "global_orientation": hamer_out_left["mano_hand_global_orient"],
-                    "camera_pose": hamer_out_left["camera_pose"],
-                }
+    #         if hamer_out_left is None:
+    #             hamer_out_frame["left"] = None
+    #         else:
+    #             hamer_out_frame["left"] = {
+    #                 "verts": hamer_out_left["verts"],
+    #                 "keypoints_3d": hamer_out_left["keypoints_3d"],
+    #                 "mano_poses": hamer_out_left["mano_hand_pose"],
+    #                 "mano_betas": hamer_out_left["mano_hand_betas"],
+    #                 "global_orientation": hamer_out_left["mano_hand_global_orient"],
+    #                 "camera_pose": hamer_out_left["camera_pose"],
+    #             }
 
-            if hamer_out_right is None:
-                hamer_out_frame["right"] = None
-            else:
-                hamer_out_frame["right"] = {
-                    "verts": hamer_out_right["verts"],
-                    "keypoints_3d": hamer_out_right["keypoints_3d"],
-                    "mano_poses": hamer_out_right["mano_hand_pose"],
-                    "mano_betas": hamer_out_right["mano_hand_betas"],
-                    "global_orientation": hamer_out_right["mano_hand_global_orient"],
-                    "camera_pose": hamer_out_right["camera_pose"],
-                }
+    #         if hamer_out_right is None:
+    #             hamer_out_frame["right"] = None
+    #         else:
+    #             hamer_out_frame["right"] = {
+    #                 "verts": hamer_out_right["verts"],
+    #                 "keypoints_3d": hamer_out_right["keypoints_3d"],
+    #                 "mano_poses": hamer_out_right["mano_hand_pose"],
+    #                 "mano_betas": hamer_out_right["mano_hand_betas"],
+    #                 "global_orientation": hamer_out_right["mano_hand_global_orient"],
+    #                 "camera_pose": hamer_out_right["camera_pose"],
+    #             }
 
-            hamer_output_seq.append(hamer_out_frame)        
-        print(f"Hamer output time: {time.time() - start_time:.2f} seconds")
-        return hamer_output_seq
+    #         hamer_output_seq.append(hamer_out_frame)        
+    #     print(f"Hamer output time: {time.time() - start_time:.2f} seconds")
+    #     return hamer_output_seq
     
+    # def visualize_hamer_output(self,sample_index:int,out_dir:str="tmp_hamer"):
+    #     os.makedirs(out_dir, exist_ok=True)
+    #     sample = self.__getitem__(sample_index, resize=None)
+    #     hamer_helper = HamerHelper()
+    #     hamer_out_frams = []
+    #     for i in range(self._subseq_len):   
+    #         rgb_image = sample.rgb_frames[i].numpy().astype(np.uint8)      
+    #         hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
+    #             rgb_image,
+    #             focal_length=sample.intrinsics[0].item(),
+    #         )
+    #         h, w = rgb_image.shape[0], rgb_image.shape[1]
+
+            
+
+    #         composited = rgb_image
+            
+    #         intrinsics = sample.intrinsics.numpy()
+    #         if hamer_out_left is not None:
+    #             for index in range(hamer_out_left["verts"].shape[0]):
+    #                 vertices = hamer_out_left["verts"][index]
+    #                 faces = hamer_out_left["faces"]
+    #                 render_rgb, rend_depth, render_mask = render_joint(vertices, faces,
+    #                                                             intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
+    #                 border_width = 10
+    #                 border_color = (255, 100, 100)
+    #                 composited = np.where(
+    #                     binary_dilation(
+    #                         render_mask, np.ones((border_width, border_width), dtype=bool)
+    #                     )[:, :, None],
+    #                     np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+    #                     composited,
+    #                 )
+    #                 composited = np.where(render_mask[:, :, None], render_rgb, composited)
+    #         if hamer_out_right is not None:
+    #             for index in range(hamer_out_right["verts"].shape[0]):
+    #                 vertices = hamer_out_right["verts"][index]
+    #                 faces = hamer_out_right["faces"]
+    #                 render_rgb, rend_depth, render_mask = render_joint(vertices, faces,
+    #                                                             intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
+    #                 border_width = 10
+    #                 border_color = (100, 100, 255)
+    #                 composited = np.where(
+    #                     binary_dilation(
+    #                         render_mask, np.ones((border_width, border_width), dtype=bool)
+    #                     )[:, :, None],
+    #                     np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+    #                     composited,
+    #                 )
+    #                 composited = np.where(render_mask[:, :, None], render_rgb, composited)
+
+    #         hamer_out_frams.append(np.concatenate([rgb_image, composited], axis=1))
+
+    #     # iio write video
+    #     iio.imwrite(os.path.join(out_dir, f"hamer_output_{sample_index}.mp4"), hamer_out_frams, fps=30, macro_block_size=None)
+
 
 from torch.utils.data import ConcatDataset
 
@@ -391,6 +504,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         projected_joints = np.zeros((sample.mano_joint_3d.shape[0],sample.mano_joint_3d.shape[1], 2))
         projected_joints[...,0] = intrinsics[0] * (sample.mano_joint_3d[...,0] / sample.mano_joint_3d[...,2]) + intrinsics[2]
         projected_joints[...,1] = intrinsics[1] * (sample.mano_joint_3d[...,1] / sample.mano_joint_3d[...,2]) + intrinsics[3]
+
         for i in tqdm(range(sample.mask.sum().item())):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
             image = image[:,:,::-1]
@@ -433,16 +547,44 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             out.write(composited)
         out.release()
     
+    # def hamer_output(self,index):
+    #     for ds in self.dataset.datasets:
+    #         if index < len(ds):
+    #             return ds.hamer_output(index)
+    #         else:
+    #             index -= len(ds)
+    
+    # def visualize_hamer_output(self,index:int,out_dir:str="tmp_hamer"):
+    #     for ds in self.dataset.datasets:
+    #         if index < len(ds):
+    #             return ds.visualize_hamer_output(index,out_dir=out_dir)
+    #         else:
+    #             index -= len(ds)
+    
 if __name__ == "__main__":
-    # Example usage
+    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True)
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp", resize=None)
+    # for i in range(len(dataset)):
+    #     sample = dataset.__getitem__(i, resize=None)
+    dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
     # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb')
     # print(f"Dataset length: {len(dataset)}")
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
 
     # for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
 
-    dataset = HandHdf5Dataset(split="train", dataset_name="ho3d", vis=True)
-    dataset.visualize_manos_in_rgb(115, out_dir="tmp",resize=None)
+    # dataset = HandHdf5Dataset(split="test", dataset_name="interhand26m", vis=True)
+    # hamer_output = dataset.hamer_output(500)
+    # sample = dataset.__getitem__(500, resize=None)
+    # dataset.visualize_hamer_output(500, out_dir="tmp_hamer")
+
+    # for frame_idx in range(len(hamer_output)):
+        
+
+    # dataset.visualize_manos_in_rgb(500, out_dir="tmp",resize=None)
+    # dataset = HandHdf5Dataset(split="test", dataset_name="dexycb", vis=True)
+    # dataset.visualize_hamer_output(200, out_dir="tmp_hamer")
+    # dataset.visualize_manos_in_rgb(200, out_dir="tmp",resize=None)
     # for dataset_name in ['all']:
     #     # for split in ['test','train','val']:
     #     split='train'
