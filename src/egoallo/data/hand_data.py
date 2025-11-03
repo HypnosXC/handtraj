@@ -269,7 +269,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 kwargs["mano_side"] = torch.ones(1)
             
             kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
-            timesteps = kwargs["mask"].sum().item()
+            # timesteps = kwargs["mask"].sum().item()
             # assert os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))), f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}"
             # print("Video name: ", dataset['video_name'][index][0].decode('utf-8'))
             if not os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))):
@@ -286,8 +286,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     for frame in reader:
                         rgb_frames.append(torch.from_numpy(frame))
                     # padding if needed
-                    if len(rgb_frames) < timesteps:
-                        rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * (timesteps - len(rgb_frames)))
+                    if len(rgb_frames) < self._subseq_len:
+                        rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * (self._subseq_len - len(rgb_frames)))
                     kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
 
                 else:
@@ -306,16 +306,16 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                         resized_frames.append(torch.from_numpy(frame_resized))
                     kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
             else:
-                kwargs["rgb_frames"] = torch.ones((timesteps,), dtype=torch.bool)
+                kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
             # if no mask in dataset, set mask to all ones
             # if we have set self.img_feat_root
             if hasattr(self, 'img_feat_root') and os.path.exists(os.path.join(self.img_feat_root, self.split)):
                 kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
-                if kwargs['img_feature'].shape[0] < timesteps:
-                    pad_len = timesteps - kwargs['img_feature'].shape[0]
+                if kwargs['img_feature'].shape[0] < self._subseq_len:
+                    pad_len = self._subseq_len - kwargs['img_feature'].shape[0]
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
             else:
-                kwargs['img_feature'] = torch.zeros((timesteps, 1280))
+                kwargs['img_feature'] = torch.zeros((self._subseq_len, 1280))
             kwargs['img_feature'] = kwargs['img_feature'].cpu()
         return HandTrainingData(**kwargs)
     
@@ -434,8 +434,11 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis)
             dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis)
             dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis)
-        
-            self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
+            if split == "train":
+                dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis)
+                self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic, dataset_ho3d])
+            else:
+                self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         else:
             self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)])
         
@@ -562,11 +565,15 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":
-    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True)
+    dataset = HandHdf5Dataset(split='test', dataset_name='dexycb', vis=True)
+    print(dataset.__getitem__(10, resize=None))
+    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp", resize=None)
-    # for i in range(len(dataset)):
-    #     sample = dataset.__getitem__(i, resize=None)
-    dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
+    for i in range(len(dataset)):
+        sample = dataset.__getitem__(i, resize=None)
+        if sample.mask.sum().item() < 64:
+            breakpoint()
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
     # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb')
     # print(f"Dataset length: {len(dataset)}")
     # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
