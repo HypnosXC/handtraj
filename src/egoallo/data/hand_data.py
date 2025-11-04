@@ -206,14 +206,14 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self._hdf5_path = "/public/datasets/handdata/interhand26m_v3.hdf5"
             self.video_root = "/public/datasets/handdata/interhand26m/data/picked_videos"
         elif dataset_name=="arctic":
-            self._hdf5_path = "/public/datasets/handdata/arctic_v3.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/arctic_v5.hdf5"
             self.video_root = "/public/datasets/handdata/arctic/picked_videos"
         elif dataset_name == "ho3d":
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
             if split == "train":
                 self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
             elif split == "evaluation":
-                self._hdf5_path = "/public/datasets/handdata/ho3d_v2_evaluation.hdf5"
+                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v4.hdf5"
             else:
                 raise ValueError("For ho3d, split should be train or evaluation")
         else:
@@ -248,20 +248,22 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 
         with h5py.File(self._hdf5_path, "r") as f:
             dataset = f[self.split]
-            # ndarray to tensor
-            if self.dataset_name=="ho3d" and self.split=="evaluation":
-                kwargs["mano_betas"]=torch.zeros(10)
-                kwargs["mano_pose"]=torch.zeros(64, 51)
-                kwargs["extrinsics"] =torch.eye(3,4)
+            # if self.dataset_name=="ho3d" and self.split=="evaluation":
+            #     kwargs["mano_betas"]=torch.zeros(10)
+            #     kwargs["mano_pose"]=torch.zeros(64, 51)
+            #     kwargs["extrinsics"] =torch.eye(3,4)
 
-            else:
-                kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
-                kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
-                kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
+            # else:
+            kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
+            kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
+            kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
                 
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
-            if self.dataset_name=="arctic":
-                kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
+            if self.dataset_name=='interhand26m':
+                interhand2mano_idx = [20, 3, 2, 1, 0, 7, 6 ,5,4,11,10,9,8,15,14,13,12,19,18,17,16]
+                kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"][:,interhand2mano_idx,:]
+            # if self.dataset_name=="arctic":
+            #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
             if dataset['mano_side'][index][0].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
@@ -485,6 +487,8 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             print("Error: mano_side should be 0 or 1")
             return None
         vertices = vertices/ 1000  # Convert to meters
+        print((joints/1000 - sample.mano_joint_3d)[0])
+        breakpoint()
         
         return vertices
     
@@ -508,6 +512,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         projected_joints[...,0] = intrinsics[0] * (sample.mano_joint_3d[...,0] / sample.mano_joint_3d[...,2]) + intrinsics[2]
         projected_joints[...,1] = intrinsics[1] * (sample.mano_joint_3d[...,1] / sample.mano_joint_3d[...,2]) + intrinsics[3]
 
+        # projected_joints = projected_joints[:, :11, :]  # only visualize first 7 joints
         for i in tqdm(range(sample.mask.sum().item())):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
             image = image[:,:,::-1]
@@ -515,7 +520,8 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                     # sample.mano_joint_3d # (batch, timesteps, 21, 3)
                     # to(batch, timesteps, 21, 3)
             for j in range(projected_joints.shape[1]):
-                cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, border_color, -1)
+                # the color of the circle depends on the joint index
+                cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, (int(255 * j / projected_joints.shape[1]), 0, int(255 * (projected_joints.shape[1] - j) / projected_joints.shape[1])), -1)
             composited = np.concatenate([image, composited], axis=1)
             #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
             out.write(composited)
@@ -565,14 +571,40 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":
-    dataset = HandHdf5Dataset(split='test', dataset_name='dexycb', vis=True)
-    print(dataset.__getitem__(10, resize=None))
-    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True)
+    # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb', vis=True)
+    # print(dataset.__getitem__(10, resize=None))
+    
+    # dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True)
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
+    
+    # cfg
+    # work
+    # # pca 
+    # # wrist
+    # # evaluation
+
+
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp", resize=None)
-    for i in range(len(dataset)):
-        sample = dataset.__getitem__(i, resize=None)
-        if sample.mask.sum().item() < 64:
-            breakpoint()
+
+    # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True)
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_interhand_joints", resize=None)
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_interhand_manos", resize=None)
+
+    dataset = HandHdf5Dataset(split='train', dataset_name='arctic', vis=True)
+    dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
+    dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=None)
+
+
+    # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True)
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_dexycb_joints", resize=None)
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_dexycb_manos", resize=None)
+
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
+    # for i in range(len(dataset)):
+    #     sample = dataset.__getitem__(i, resize=None)
+    #     breakpoint()
+        # if sample.mask.sum().item() < 64:
+        #     breakpoint()
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
     # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb')
     # print(f"Dataset length: {len(dataset)}")
