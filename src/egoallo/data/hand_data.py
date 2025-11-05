@@ -10,6 +10,7 @@ import torch.utils
 import torch.utils.data
 import os
 os.environ["PYOPENGL_PLATFORM"] = "egl"
+import json
 
 import imageio.v3 as iio
 from tqdm import tqdm
@@ -206,14 +207,14 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self._hdf5_path = "/public/datasets/handdata/interhand26m_v3.hdf5"
             self.video_root = "/public/datasets/handdata/interhand26m/data/picked_videos"
         elif dataset_name=="arctic":
-            self._hdf5_path = "/public/datasets/handdata/arctic_v5.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/arctic_v7.hdf5"
             self.video_root = "/public/datasets/handdata/arctic/picked_videos"
         elif dataset_name == "ho3d":
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
             if split == "train":
                 self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
             elif split == "evaluation":
-                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v4.hdf5"
+                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v6.hdf5"
             else:
                 raise ValueError("For ho3d, split should be train or evaluation")
         else:
@@ -228,6 +229,21 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self._subseq_len = 64  # Default subsequence length, can be overridden.
             self.N = dataset['mano_side'].shape[0]
             # self.keys = list(dataset.keys())
+
+        self.left_mano_layer = ManoLayer(
+            use_pca=False,
+            flat_hand_mean=True,
+            ncomps=45,
+            side='left',
+            mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
+        )
+        self.right_mano_layer = ManoLayer(
+            use_pca=False,
+            flat_hand_mean=True,
+            ncomps=45,
+            side='right',
+            mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
+        )
         # self.left_mano_layer = ManoLayer(
         #     use_pca=False,
         #     flat_hand_mean=True,
@@ -281,6 +297,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
                 elif 'video_name' in dataset:
                     video_name = dataset['video_name'][index][0].decode('utf-8')
+                    # print("Loading video: ", video_name)
                     # video_path = os.path.join("/public/datasets/handdata/interhand26m/data/picked_videos", self.split, video_name)
                     video_path = os.path.join(self.video_root, self.split, video_name)
                     reader = iio.imread(video_path)
@@ -323,6 +340,118 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     
     def __len__(self) -> int:
         return self.N
+
+    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,from_mano=False) -> None:
+        os.makedirs(out_dir, exist_ok=True)
+        sample = self.__getitem__(index, resize=resize)
+        intrinsics = sample.intrinsics.numpy()
+        border_color = [255, 0, 0]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
+        out = cv2.VideoWriter(out_dir+"/gt_joints.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
+
+        if from_mano:
+            _, mano_joint_3d = self.get_vertices_joints(index)
+        else:
+            mano_joint_3d = sample.mano_joint_3d
+        projected_joints = np.zeros((mano_joint_3d.shape[0],mano_joint_3d.shape[1], 2))
+        if self.dataset_name == "arctic":
+            intrinsics = torch.tensor(intrinsics)
+            # (64,1)*(64,21) -> (64,21)
+            projected_joints[...,0] = intrinsics[:,0:1] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[:,2:3]
+            projected_joints[...,1] = intrinsics[:,1:2] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[:,3:4]
+        else:
+            projected_joints[...,0] = intrinsics[0] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[2]
+            projected_joints[...,1] = intrinsics[1] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[3]
+        # projected_joints = projected_joints[:, :11, :]  # only visualize first 7 joints
+        for i in tqdm(range(sample.mask.sum().item())):
+            image = sample.rgb_frames[i].numpy().astype(np.uint8)
+            image = image[:,:,::-1]
+            composited = image.copy()
+                    # sample.mano_joint_3d # (batch, timesteps, 21, 3)
+                    # to(batch, timesteps, 21, 3)
+            for j in range(projected_joints.shape[1]):
+                # the color of the circle depends on the joint index
+                cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, (int(255 * j / projected_joints.shape[1]), 0, int(255 * (projected_joints.shape[1] - j) / projected_joints.shape[1])), -1)
+            composited = np.concatenate([image, composited], axis=1)
+            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+            out.write(composited)
+        out.release()
+
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,debug=False) -> None:
+        os.makedirs(out_dir, exist_ok=True)
+        mano_vertices, _ = self.get_vertices_joints(index)
+        if debug:
+            verts_json = "/public/home/group_ucb/yunqili/.cache/huggingface/hub/datasets--AnnieLiyunqi--verts_ho3d/snapshots/103cbce86985aa35997f18496f1cd3b02ede0fea/evaluation_verts.json"
+            with open(verts_json, 'r') as f:
+                verts_data = json.load(f)
+            verts_data = np.array(verts_data)
+            verts_data[:,:,1] *= -1  # flip y axis
+            verts_data[:,:,2] *= -1  # flip z axis
+            vertices = torch.tensor(verts_data[659:659+64])  # (T, 778, 3)
+            # breakpoint()
+        else:
+            vertices = mano_vertices  # (T, 778, 3)
+        sample = self.__getitem__(index, resize=resize)
+        
+        faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
+        intrinsics = sample.intrinsics.numpy()
+        border_color = [255, 0, 0]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
+        out = cv2.VideoWriter(out_dir+"/gt.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
+        for i in tqdm(range(sample.mask.sum().item())):
+            image = sample.rgb_frames[i].numpy().astype(np.uint8)
+            image = image[:,:,::-1]
+            if self.dataset_name == "arctic":
+                intr = intrinsics[i]
+            else:
+                intr = intrinsics
+            render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
+                                                               intr, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
+            border_width = 10
+            composited = np.where(
+                binary_dilation(
+                    render_mask, np.ones((border_width, border_width), dtype=bool)
+                )[:, :, None],
+                np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+                image,
+            )
+            composited = np.where(render_mask[:, :, None], render_rgb, image)
+            composited = np.concatenate([image, composited], axis=1)
+            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
+            out.write(composited)
+        out.release()
+
+    def get_vertices_joints(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        sample = self.__getitem__(index)
+        if sample.mano_side.item() == 0:
+            vertices, joints = self.left_mano_layer(
+                sample.mano_pose[:,:48],
+                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
+                sample.mano_pose[:,48:51]
+            )
+        elif sample.mano_side.item() == 1:
+            vertices, joints = self.right_mano_layer(
+                sample.mano_pose[:,:48],
+                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
+                sample.mano_pose[:,48:51]
+            )
+        else:
+            print("Error: mano_side should be 0 or 1")
+            return None
+        vertices = vertices/ 1000  # Convert to meters
+        joints = joints / 1000  # Convert to meters
+        # print((joints - sample.mano_joint_3d)[0])
+        
+        return vertices, joints
+    
+    def get_mano_faces(self,mano_side='left'):
+        if mano_side=='right':
+            return self.right_mano_layer.th_faces
+        elif mano_side=='left':
+            return self.left_mano_layer.th_faces
+        else:
+            print("Error: mano_side should be 'left' or 'right'")
+            return None
     
     # def hamer_output(self,index):
     #     sample = self.__getitem__(index, resize=None)
@@ -444,20 +573,6 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)])
         
-        self.left_mano_layer = ManoLayer(
-            use_pca=False,
-            flat_hand_mean=True,
-            ncomps=45,
-            side='left',
-            mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
-        )
-        self.right_mano_layer = ManoLayer(
-            use_pca=False,
-            flat_hand_mean=True,
-            ncomps=45,
-            side='right',
-            mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
-        )
 
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         for ds in self.dataset.datasets:
@@ -469,92 +584,30 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def get_vertices_faces(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        sample = self.__getitem__(index)
-        if sample.mano_side.item() == 0:
-            vertices, joints = self.left_mano_layer(
-                sample.mano_pose[:,:48],
-                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-                sample.mano_pose[:,48:51]
-            )
-        elif sample.mano_side.item() == 1:
-            vertices, joints = self.right_mano_layer(
-                sample.mano_pose[:,:48],
-                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-                sample.mano_pose[:,48:51]
-            )
-        else:
-            print("Error: mano_side should be 0 or 1")
-            return None
-        vertices = vertices/ 1000  # Convert to meters
-        print((joints/1000 - sample.mano_joint_3d)[0])
-        breakpoint()
-        
-        return vertices
-    
+    def get_vertices_joints(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        for ds in self.dataset.datasets:
+            if index < len(ds):
+                return ds.get_vertices_joints(index)
+            else:
+                index -= len(ds)
     def get_mano_faces(self,mano_side='left'):
-        if mano_side=='right':
-            return self.right_mano_layer.th_faces
-        elif mano_side=='left':
-            return self.left_mano_layer.th_faces
-        else:
-            print("Error: mano_side should be 'left' or 'right'")
-            return None
+        for ds in self.dataset.datasets:
+            return ds.get_mano_faces(mano_side=mano_side)
         
-    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
-        os.makedirs(out_dir, exist_ok=True)
-        sample = self.__getitem__(index, resize=resize)
-        intrinsics = sample.intrinsics.numpy()
-        border_color = [255, 0, 0]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
-        out = cv2.VideoWriter(out_dir+"/gt_joints.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
-        projected_joints = np.zeros((sample.mano_joint_3d.shape[0],sample.mano_joint_3d.shape[1], 2))
-        projected_joints[...,0] = intrinsics[0] * (sample.mano_joint_3d[...,0] / sample.mano_joint_3d[...,2]) + intrinsics[2]
-        projected_joints[...,1] = intrinsics[1] * (sample.mano_joint_3d[...,1] / sample.mano_joint_3d[...,2]) + intrinsics[3]
+    def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,from_mano=False) -> None:
+        for ds in self.dataset.datasets:
+            if index < len(ds):
+                return ds.visualize_joints_in_rgb(index,out_dir=out_dir,resize=resize,from_mano=from_mano)
+            else:
+                index -= len(ds)
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,debug=False) -> None:
+        for ds in self.dataset.datasets:
+            if index < len(ds):
+                return ds.visualize_manos_in_rgb(index,out_dir=out_dir,resize=resize,debug=debug)
+            else:
+                index -= len(ds)
 
-        # projected_joints = projected_joints[:, :11, :]  # only visualize first 7 joints
-        for i in tqdm(range(sample.mask.sum().item())):
-            image = sample.rgb_frames[i].numpy().astype(np.uint8)
-            image = image[:,:,::-1]
-            composited = image.copy()
-                    # sample.mano_joint_3d # (batch, timesteps, 21, 3)
-                    # to(batch, timesteps, 21, 3)
-            for j in range(projected_joints.shape[1]):
-                # the color of the circle depends on the joint index
-                cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, (int(255 * j / projected_joints.shape[1]), 0, int(255 * (projected_joints.shape[1] - j) / projected_joints.shape[1])), -1)
-            composited = np.concatenate([image, composited], axis=1)
-            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
-            out.write(composited)
-        out.release()
-
-    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
-        os.makedirs(out_dir, exist_ok=True)
-        vertices = self.get_vertices_faces(index)
-        sample = self.__getitem__(index, resize=resize)
-        
-        faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
-        intrinsics = sample.intrinsics.numpy()
-        border_color = [255, 0, 0]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 format
-        out = cv2.VideoWriter(out_dir+"/gt.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
-        for i in tqdm(range(sample.mask.sum().item())):
-            image = sample.rgb_frames[i].numpy().astype(np.uint8)
-            image = image[:,:,::-1]
-            render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
-                                                               intrinsics, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
-            border_width = 10
-            composited = np.where(
-                binary_dilation(
-                    render_mask, np.ones((border_width, border_width), dtype=bool)
-                )[:, :, None],
-                np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-                image,
-            )
-            composited = np.where(render_mask[:, :, None], render_rgb, image)
-            composited = np.concatenate([image, composited], axis=1)
-            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
-            out.write(composited)
-        out.release()
+    
     
     # def hamer_output(self,index):
     #     for ds in self.dataset.datasets:
@@ -574,15 +627,15 @@ if __name__ == "__main__":
     # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb', vis=True)
     # print(dataset.__getitem__(10, resize=None))
     
-    # dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True)
-    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
-    
+    # dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True)
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None, from_mano=True)
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
+
     # cfg
     # work
     # # pca 
     # # wrist
     # # evaluation
-
 
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp", resize=None)
 
@@ -590,7 +643,7 @@ if __name__ == "__main__":
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_interhand_joints", resize=None)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_interhand_manos", resize=None)
 
-    dataset = HandHdf5Dataset(split='train', dataset_name='arctic', vis=True)
+    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True)
     dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
     dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=None)
 
