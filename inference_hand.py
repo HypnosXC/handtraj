@@ -125,8 +125,12 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
         for j in range(len(Trajs)):
             vertices=vertices_list[j]
             faces = faces_list[j]
-            render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                                intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+            if len(intrinsics.shape)==2:
+                render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+                                                                    intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+            else:
+                render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+                                                                    intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
             # breakpoint()
             border_width = 10
             composited_tmp = np.where(
@@ -166,7 +170,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path =Path("./experiments/hand_train_cond_img/v2/checkpoints_25000/") # Path("./experiments/my_hand_training/v7/checkpoints_300000/")
+    checkpoint_dir: Path = Path("/home/group_ucb/xuchen/handtraj/experiments/hand_train_rot_mat/v2/checkpoints_670000/")#Path("./experiments/hand_train_cond_img/v3/checkpoints_300000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -205,6 +209,7 @@ def inference_and_visualize(
     print(denoiser_network)
     using_mat = denoiser_network.config.using_mat
     using_img_feat = denoiser_network.config.using_img_feat
+    print("Using image feature: ", using_img_feat, ", using rot mat:", using_mat)
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
         mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
@@ -430,7 +435,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'dexycb',vis=True)
+    dataset = HandHdf5Dataset(split="train",dataset_name = 'ho3d',vis=True)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -526,6 +531,7 @@ def main(args: Args) -> None:
         print("3D Joint mean error per video: ",joint_errors/N)
     else: 
         denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
+        print("Success when load ckpt from:", args.checkpoint_dir)
         train_batch = []
         rand_id = 0 
         if visualized == True:
@@ -539,16 +545,29 @@ def main(args: Args) -> None:
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
             pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
             _,_,joints_pred = pred.apply_to_hand()
-            error_joints =  torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
+            x_0_packed = hand_network.HandDenoiseTraj(
+                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((1, 64, 10)),
+                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(1,64,15,3),
+                                                            global_orientation=train_batch.mano_pose[:,:,0:3],
+                                                            global_translation=train_batch.mano_pose[:,:,48:],
+                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand(1, 64, -1),
+                                                    )
+            _,_,joints_gt = x_0_packed.apply_to_hand()
+            loss_mask = train_batch.mask
+            #train_batch.mano_joint_3d.to(device)
+            print(train_batch.mano_joint_3d.to(device))
+            error_joints =  torch.sqrt(((joints_gt.cpu() - joints_pred.cpu())**2).sum(dim=-1)).mean(dim=-1).cpu()
+            error_joints = (torch.where(loss_mask,error_joints,torch.zeros_like(error_joints)).sum()/loss_mask.sum()).numpy()*1000
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
-            # pred_list = []
-            # for i in range(4):
+            pred_list = [x_0_packed]
+            # for i in range(3):
             #     pred = inference_and_visualize(denoiser_network,train_batch,device,False)
             #     pred_list.append(pred)
             # visualize_joints_in_rgb(pred_list,
             #                         intrinsics=train_batch.intrinsics.squeeze(0),
             #                         rgb_frames=train_batch.rgb_frames.squeeze(0),
+            #                         subseq_len = train_batch.mask.sum().cpu().numpy(),
             #                         out_dir = "tmp/visualize_hand")
         else:
             errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0}

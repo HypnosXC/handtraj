@@ -131,8 +131,7 @@ def run_training(
         # subseq_len=config.subseq_len,
         # cache_files=True,
         # slice_strategy=config.dataset_slice_strategy,
-        # random_variable_len_proportion=config.dataset_slice_random_variable_len_proportion,
-        dataset_name='dexycb',
+        # dataset_name='dexycb',
         # vis=True
     )
     
@@ -166,11 +165,11 @@ def run_training(
     accelerator.register_for_checkpointing(scheduler)
 
     # Restore checkpoint if provided
-    # restore_checkpoint_dir = (Path(__file__).absolute().parent
-    #     / "experiments"
-    #     / config.experiment_name
-    #     / "v7"
-    #     / "checkpoints_300000")
+    restore_checkpoint_dir = (Path(__file__).absolute().parent
+        / "experiments"
+        / config.experiment_name
+        / "v1"
+        / "checkpoints_400000")
     if restore_checkpoint_dir is not None:
         accelerator.load_state(str(restore_checkpoint_dir))
 
