@@ -170,7 +170,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/home/group_ucb/xuchen/handtraj/experiments/hand_train_rot_mat/v2/checkpoints_670000/")#Path("./experiments/hand_train_cond_img/v3/checkpoints_300000/")
+    checkpoint_dir: Path = Path("/public/home/group_ucb/xuchen/handtraj/experiments/hand_train_rot_mat/v2/checkpoints_670000/")#Path("./experiments/hand_train_cond_img/v3/checkpoints_300000/")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
