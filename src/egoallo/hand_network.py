@@ -207,8 +207,8 @@ class HandDenoiserConfig:
     include_canonicalized_cpf_rotation_in_cond: bool = True
 
     cond_param: Literal[
-        "ours", "all", "wrist_motion","canonicalized", "absolute", "absrel", "absrel_global_deltas"
-    ] = "wrist_motion"
+        "ours", "all", "wrist_motion","differential","canonicalized", "absolute", "absrel", "absrel_global_deltas"
+    ] = "differential"
     """Which conditioning parameterization to use.
 
     "ours" is the default, we try to be clever and design something with nice
@@ -232,6 +232,10 @@ class HandDenoiserConfig:
             d_cond += 3 ## root position
             d_cond += 3 ## root differential motion
         elif self.cond_param == "wrist_motion":
+            d_cond = 0
+            d_cond += 0 ## root position
+            d_cond += 13 ## differential motion
+        elif self.cond_param == "differential":
             d_cond = 0
             d_cond += 0 ## root position
             d_cond += 13 ## differential motion
@@ -280,6 +284,20 @@ class HandDenoiserConfig:
             cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
             # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
             diff_motion = prior_motion.inverse() @ cur_motion 
+            cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
+                              diff_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))),
+                              dim=1)
+            cond = torch.cat((cond,conds.mano_side),dim=-1)
+        elif self.cond_param == "differential":
+            trans = conds.global_translation
+            prior_orien = SO3.exp(conds.global_orientation[:,:-1,:])
+            cur_orien = SO3.exp(conds.global_orientation[:,1:,:])
+            prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
+            cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
+            # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
+            diff_motion = prior_motion.inverse() @ cur_motion 
+            cur_motion = cur_motion.inverse() @ cur_motion
+            # print("identi mat is", cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:])
             cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
                               diff_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))),
                               dim=1)

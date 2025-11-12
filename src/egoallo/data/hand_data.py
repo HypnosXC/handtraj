@@ -281,6 +281,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             # if self.dataset_name=="arctic":
             #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
+            if len(kwargs["intrinsics"].shape) == 1:
+                kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(64, -1)
             if dataset['mano_side'][index][0].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
             else:

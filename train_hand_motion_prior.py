@@ -165,11 +165,11 @@ def run_training(
     accelerator.register_for_checkpointing(scheduler)
 
     # Restore checkpoint if provided
-    restore_checkpoint_dir = (Path(__file__).absolute().parent
-        / "experiments"
-        / config.experiment_name
-        / "v1"
-        / "checkpoints_400000")
+    # restore_checkpoint_dir = (Path(__file__).absolute().parent
+    #     / "experiments"
+    #     / config.experiment_name
+    #     / "v1"
+    #     / "checkpoints_400000")
     if restore_checkpoint_dir is not None:
         accelerator.load_state(str(restore_checkpoint_dir))
 
