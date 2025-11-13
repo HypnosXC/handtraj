@@ -196,7 +196,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self._hdf5_path = "/public/datasets/handdata/interhand26m_v4.hdf5"
             self.video_root = "/public/datasets/handdata/interhand26m/data/picked_videos"
         elif dataset_name=="arctic":
-            self._hdf5_path = "/public/datasets/handdata/arctic_v7.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/arctic_v8.hdf5"
             self.video_root = "/public/datasets/handdata/arctic/picked_videos"
         elif dataset_name == "ho3d":
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
@@ -276,8 +276,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(clip_len, -1)
             else:
                 kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
-            if self.dataset_name == "arctic":
-                kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
+                if self._subseq_len != -1: 
+                    kwargs["intrinsics"] = torch.cat([kwargs["intrinsics"], torch.zeros((pad_len, kwargs["intrinsics"].shape[1]))], dim=0)
             if dataset['mano_side'][()].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
             else:
@@ -615,19 +615,19 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
-    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
+    # dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None, from_mano=True)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
-    dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=(512,512))
-    dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=(512,512))
+    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=(512,512))
+    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=(512,512))
 
     # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_interhand_joints", resize=None)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_interhand_manos", resize=None)
 
-    # dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True)
-    # dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
-    # dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=None)
+    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32)
+    dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
+    dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=(512,512))
 
 
     # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
