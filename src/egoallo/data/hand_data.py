@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 from egoallo.data.dataclass import HandTrainingData
 # from hamer.utils.mesh_renderer import create_raymond_lights
 def create_raymond_lights():
-    # import pyrender
     thetas = np.pi * np.array([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0])
     phis = np.pi * np.array([0.0, 2.0 / 3.0, 4.0 / 3.0])
 
@@ -172,39 +171,29 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
 
     Args:
-        hdf5_path: Path to the HDF5 file containing the dataset.
-        splits: "train", "val" or "test" splits to include in the dataset.
+        dataset_name: Name of the dataset to load. Options are "dexycb", "interhand26m", "arctic" and "ho3d".
+        splits: "train", "val" or "test" splits to include in the dataset. For ho3d,
+            use "train" and "evaluation".
+        vis: Whether to load RGB frames for visualization.
         subseq_len: Length of subsequences to sample from the dataset.
-        cache_files: Whether to cache the entire dataset in memory.
-        deterministic_slices: Set to True to always use the same slices. This
-            is useful for reproducible eval.
+        clip_stride: Stride between subsequences.
+        min_len: Minimum length of subsequences to include.
     """
 
     def __init__(
         self,
         dataset_name: str = "dexycb", # dexycb, interhand26m, arctic, ho3d
-        # hdf5_path: Path="/public/datasets/handdata/dexycb_v2.hdf5", # 
-        split: Literal["train", "val", "test"] = "train",
+        split: Literal["train", "val", "test", "evaluation"] = "train",
         vis: bool = False,
-        # file_list_path: Path,
-        # splits: tuple[
-        #     Literal["train", "val", "test"], ...
-        # ],
-        # slice_strategy: Literal[
-        #     "deterministic", "random_uniform_len", "random_variable_len"
-        # ] = "deterministic",
-        # subseq_len: int=64, # Length of subsequences to sample.
-        # cache_files: bool,
-        # min_subseq_len: int | None = None,
-        # random_variable_len_proportion: float = 0.3,
-        # random_variable_len_min: int = 16,
+        subseq_len: int = 64,
+        clip_stride: int = 8,
+        min_len: int = 32,
     ) -> None:
         if dataset_name=="dexycb":
-            self._hdf5_path = "/public/datasets/handdata/dexycb_v5.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/dexycb_v6.hdf5"
             self.video_root = "/public/datasets/handdata/dexycb/videos_v4"
-            self.img_feat_root = "/public/datasets/handdata/dexycb/img_feats"
         elif dataset_name=="interhand26m":
-            self._hdf5_path = "/public/datasets/handdata/interhand26m_v3.hdf5"
+            self._hdf5_path = "/public/datasets/handdata/interhand26m_v4.hdf5"
             self.video_root = "/public/datasets/handdata/interhand26m/data/picked_videos"
         elif dataset_name=="arctic":
             self._hdf5_path = "/public/datasets/handdata/arctic_v7.hdf5"
@@ -212,24 +201,42 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         elif dataset_name == "ho3d":
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
             if split == "train":
-                self._hdf5_path = "/public/datasets/handdata/ho3d_v2.hdf5"
+                self._hdf5_path = "/public/datasets/handdata/ho3d_v3.hdf5"
             elif split == "evaluation":
-                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v6.hdf5"
+                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v7.hdf5"
             else:
                 raise ValueError("For ho3d, split should be train or evaluation")
         else:
             raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
-        # self.rgb_format = "color_{:06d}.jpg"
         self.split = split
         self.dataset_name = dataset_name
         self.vis = vis
-        with h5py.File(self._hdf5_path, "r") as hdf5_file:
-            # ]
-            dataset = hdf5_file[self.split]
-            self._subseq_len = 64  # Default subsequence length, can be overridden.
-            self.N = dataset['mano_side'].shape[0]
-            # self.keys = list(dataset.keys())
+        self._clip_stride = clip_stride
+        self._subseq_len = subseq_len
+        self._min_len = min_len
+        json_dir = self._hdf5_path.replace('.hdf5','_json')
+        json_file_path = os.path.join(json_dir, f"{split}.json")
+        self._mapping = []
+        with open(json_file_path, 'r') as f:
+            json_data = json.load(f)
+        for group_name in json_data.keys():
+            group_length = json_data[group_name]
+            if self._subseq_len == -1:
+                self._mapping.append((group_name, 0, group_length))
+            else:
+                if group_length < self._min_len:
+                    continue
+                if group_length <= self._subseq_len:
+                    self._mapping.append((group_name, 0, group_length)) # group_name, start_idx, len
+                else:
+                    start_idx = 0
+                    while start_idx + self._subseq_len < group_length:
+                        self._mapping.append((group_name, start_idx, self._subseq_len))
+                        start_idx += self._clip_stride
+                    # last clip
+                    self._mapping.append((group_name, group_length - self._subseq_len, self._subseq_len))
 
+        self.N = len(self._mapping)
         self.left_mano_layer = ManoLayer(
             use_pca=False,
             flat_hand_mean=True,
@@ -244,97 +251,79 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             side='right',
             mano_root="/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano",
         )
-        # self.left_mano_layer = ManoLayer(
-        #     use_pca=False,
-        #     flat_hand_mean=True,
-        #     ncomps=45,
-        #     side='left',
-        #     mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        # )
-        # self.right_mano_layer = ManoLayer(
-        #     use_pca=False,
-        #     flat_hand_mean=True,
-        #     ncomps=45,
-        #     side='right',
-        #     mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-        # )
         
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         kwargs: dict[str, Any] = {}
-
+        group_name, start_idx, clip_len = self._mapping[index]
+        if self._subseq_len == -1:
+            pad_len = 0
+        else:
+            pad_len = self._subseq_len - clip_len
         with h5py.File(self._hdf5_path, "r") as f:
-            dataset = f[self.split]
-            # if self.dataset_name=="ho3d" and self.split=="evaluation":
-            #     kwargs["mano_betas"]=torch.zeros(10)
-            #     kwargs["mano_pose"]=torch.zeros(64, 51)
-            #     kwargs["extrinsics"] =torch.eye(3,4)
-
-            # else:
-            kwargs["mano_betas"]=torch.from_numpy(dataset['mano_betas'][index])
-            kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][index,:,0])
-            kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][index])
+            dataset = f[group_name]
+            kwargs["mano_betas"] = torch.from_numpy(dataset['mano_betas'][:])
+            kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][start_idx:start_idx+clip_len,0])
+            kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][:])
                 
-            kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][index,:,0])
-            if self.dataset_name=='interhand26m':
-                interhand2mano_idx = [20, 3, 2, 1, 0, 7, 6 ,5,4,11,10,9,8,15,14,13,12,19,18,17,16]
-                kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"][:,interhand2mano_idx,:]
+            kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
             # if self.dataset_name=="arctic":
             #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
-            kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][index])
+            kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][:])
             if len(kwargs["intrinsics"].shape) == 1:
-                kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(64, -1)
-            if dataset['mano_side'][index][0].decode('utf-8') == 'left':
+                if self._subseq_len !=-1: 
+                    kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(self._subseq_len, -1)
+                else:
+                    kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(clip_len, -1)
+            else:
+                kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
+            if self.dataset_name == "arctic":
+                kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
+            if dataset['mano_side'][()].decode('utf-8') == 'left':
                 kwargs["mano_side"] = torch.zeros(1)
             else:
                 kwargs["mano_side"] = torch.ones(1)
-            
-            kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
-            # timesteps = kwargs["mask"].sum().item()
-            # assert os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))), f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}"
-            # print("Video name: ", dataset['video_name'][index][0].decode('utf-8'))
-            if not os.path.exists(os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))):
-                print(f"Video not found: {os.path.join(self.video_root, self.split, dataset['video_name'][index][0].decode('utf-8'))}")
+            # kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
+            kwargs["mask"] = torch.ones((clip_len), dtype=torch.bool)
+            # pad if needed
+            if pad_len > 0:
+                kwargs["mano_pose"] = torch.cat([kwargs["mano_pose"], torch.zeros((pad_len, *kwargs["mano_pose"].shape[1:]))], dim=0)
+                kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
+                kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
+            video_name = dataset['video_name'][()].decode('utf-8')
+            if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
+                print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
             if self.vis:
-                if 'rgb_frames' in dataset:
-                    kwargs["rgb_frames"] = torch.tensor(dataset['rgb_frames'][index].transpose(0,2,3,1))
-                elif 'video_name' in dataset:
-                    video_name = dataset['video_name'][index][0].decode('utf-8')
-                    # print("Loading video: ", video_name)
-                    # video_path = os.path.join("/public/datasets/handdata/interhand26m/data/picked_videos", self.split, video_name)
-                    video_path = os.path.join(self.video_root, self.split, video_name)
-                    reader = iio.imread(video_path)
-                    rgb_frames = []
-                    for frame in reader:
-                        rgb_frames.append(torch.from_numpy(frame))
-                    # padding if needed
-                    if len(rgb_frames) < self._subseq_len:
-                        rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * (self._subseq_len - len(rgb_frames)))
-                    kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
-
-                else:
-                    raise ValueError("No rgb_frames or video_name in test dataset")
+                video_path = os.path.join(self.video_root, self.split, video_name)
+                reader = iio.imread(video_path)
+                rgb_frames = []
+                for i in range(start_idx, start_idx + clip_len):
+                    frame = reader[i]
+                    rgb_frames.append(torch.from_numpy(frame))
+                if pad_len > 0:
+                    rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * pad_len)
+                kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
                 # resize
                 if resize is not None:
                     resized_frames = []
                     intrinsics = kwargs["intrinsics"].clone()
-                    kwargs["intrinsics"][0] = intrinsics[0] * resize[0] / kwargs["rgb_frames"].shape[2]
-                    kwargs["intrinsics"][1] = intrinsics[1] * resize[1] / kwargs["rgb_frames"].shape[1]
-                    kwargs["intrinsics"][2] = intrinsics[2] * resize[0] / kwargs["rgb_frames"].shape[2]
-                    kwargs["intrinsics"][3] = intrinsics[3] * resize[1] / kwargs["rgb_frames"].shape[1]
                     for i in range(kwargs["rgb_frames"].shape[0]):
                         frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
                         frame_resized = cv2.resize(frame, resize)
                         resized_frames.append(torch.from_numpy(frame_resized))
+                    intrinsics[:, 0] = intrinsics[:, 0] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    intrinsics[:, 1] = intrinsics[:, 1] * resize[1] / kwargs["rgb_frames"].shape[1]
+                    intrinsics[:, 2] = intrinsics[:, 2] * resize[0] / kwargs["rgb_frames"].shape[2]
+                    intrinsics[:, 3] = intrinsics[:, 3] * resize[1] / kwargs["rgb_frames"].shape[1]
+                    kwargs["intrinsics"] = intrinsics
                     kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
             else:
-                kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
-            # if no mask in dataset, set mask to all ones
-            # if we have set self.img_feat_root
-            if hasattr(self, 'img_feat_root') and os.path.exists(os.path.join(self.img_feat_root, self.split)):
-                kwargs['img_feature'] = torch.load(os.path.join(self.img_feat_root, self.split, f'imgfeat_{index}.pt')).squeeze(1) # T,1280
-                if kwargs['img_feature'].shape[0] < self._subseq_len:
-                    pad_len = self._subseq_len - kwargs['img_feature'].shape[0]
-                    kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
+                if self._subseq_len == -1:
+                    kwargs["rgb_frames"] = torch.ones((clip_len), dtype=torch.uint8)
+                else:
+                    kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
+
+            if self._subseq_len == -1:
+                kwargs['img_feature'] = torch.zeros((clip_len, 1280))
             else:
                 kwargs['img_feature'] = torch.zeros((self._subseq_len, 1280))
             kwargs['img_feature'] = kwargs['img_feature'].cpu()
@@ -356,43 +345,39 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             mano_joint_3d = sample.mano_joint_3d
         projected_joints = np.zeros((mano_joint_3d.shape[0],mano_joint_3d.shape[1], 2))
-        if self.dataset_name == "arctic":
-            intrinsics = torch.tensor(intrinsics)
-            # (64,1)*(64,21) -> (64,21)
-            projected_joints[...,0] = intrinsics[:,0:1] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[:,2:3]
-            projected_joints[...,1] = intrinsics[:,1:2] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[:,3:4]
-        else:
-            projected_joints[...,0] = intrinsics[0] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[2]
-            projected_joints[...,1] = intrinsics[1] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[3]
-        # projected_joints = projected_joints[:, :11, :]  # only visualize first 7 joints
+        # if self.dataset_name == "arctic":
+        intrinsics = torch.tensor(intrinsics)
+        # (64,1)*(64,21) -> (64,21)
+        projected_joints[...,0] = intrinsics[:,0:1] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[:,2:3]
+        projected_joints[...,1] = intrinsics[:,1:2] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[:,3:4]
+        # else:
+        #     projected_joints[...,0] = intrinsics[0] * (mano_joint_3d[...,0] / mano_joint_3d[...,2]) + intrinsics[2]
+        #     projected_joints[...,1] = intrinsics[1] * (mano_joint_3d[...,1] / mano_joint_3d[...,2]) + intrinsics[3]
+        # projected_joints = projected_joints[:, :11, :]  # only visualize first 11 joints
         for i in tqdm(range(sample.mask.sum().item())):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
             image = image[:,:,::-1]
             composited = image.copy()
-                    # sample.mano_joint_3d # (batch, timesteps, 21, 3)
-                    # to(batch, timesteps, 21, 3)
             for j in range(projected_joints.shape[1]):
                 # the color of the circle depends on the joint index
                 cv2.circle(composited, (int(projected_joints[i,j,0]), int(projected_joints[i,j,1])), 3, (int(255 * j / projected_joints.shape[1]), 0, int(255 * (projected_joints.shape[1] - j) / projected_joints.shape[1])), -1)
             composited = np.concatenate([image, composited], axis=1)
-            #iio.imwrite(os.path.join(out_dir, f"{i:03d}.jpg"), composited)
             out.write(composited)
         out.release()
 
     def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,debug=False) -> None:
         os.makedirs(out_dir, exist_ok=True)
         mano_vertices, _ = self.get_vertices_joints(index)
-        if debug:
-            verts_json = "/public/home/group_ucb/yunqili/.cache/huggingface/hub/datasets--AnnieLiyunqi--verts_ho3d/snapshots/103cbce86985aa35997f18496f1cd3b02ede0fea/evaluation_verts.json"
-            with open(verts_json, 'r') as f:
-                verts_data = json.load(f)
-            verts_data = np.array(verts_data)
-            verts_data[:,:,1] *= -1  # flip y axis
-            verts_data[:,:,2] *= -1  # flip z axis
-            vertices = torch.tensor(verts_data[659:659+64])  # (T, 778, 3)
-            # breakpoint()
-        else:
-            vertices = mano_vertices  # (T, 778, 3)
+        # if debug:
+        #     verts_json = "/public/home/group_ucb/yunqili/.cache/huggingface/hub/datasets--AnnieLiyunqi--verts_ho3d/snapshots/103cbce86985aa35997f18496f1cd3b02ede0fea/evaluation_verts.json"
+        #     with open(verts_json, 'r') as f:
+        #         verts_data = json.load(f)
+        #     verts_data = np.array(verts_data)
+        #     verts_data[:,:,1] *= -1  # flip y axis
+        #     verts_data[:,:,2] *= -1  # flip z axis
+        #     vertices = torch.tensor(verts_data[659:659+64])  # (T, 778, 3)
+        # else:
+        vertices = mano_vertices  # (T, 778, 3)
         sample = self.__getitem__(index, resize=resize)
         
         faces = self.get_mano_faces(mano_side="right" if sample.mano_side.item()==1 else "left")
@@ -403,10 +388,10 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         for i in tqdm(range(sample.mask.sum().item())):
             image = sample.rgb_frames[i].numpy().astype(np.uint8)
             image = image[:,:,::-1]
-            if self.dataset_name == "arctic":
-                intr = intrinsics[i]
-            else:
-                intr = intrinsics
+            # if self.dataset_name == "arctic":
+            intr = intrinsics[i]
+            # else:
+            #     intr = intrinsics
             render_rgb, rend_depth, render_mask = render_joint(vertices[i].numpy(), faces.numpy(),
                                                                intr, h=sample.rgb_frames.shape[1], w=sample.rgb_frames.shape[2])
             border_width = 10
@@ -557,23 +542,29 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 from torch.utils.data import ConcatDataset
 
 class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
-    # concate HandHdf5EachDataset(dexycb) and HandHdf5EachDataset(interhand26m)
-    # to a single dataset
-    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m", "ho3d"] = 'all', vis=False) -> None:
-        # if dataset_name is None and split == "test":
-        #     dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb")
-        #     self.dataset = dataset_dexycb
+    """Dataset which loads from our preprocessed hdf5 file.
+
+    Args:
+        split: "train", "val" or "test" splits to include in the dataset. For ho3d,
+            use "train" and "evaluation".
+        dataset_name: Name of the dataset to load. Options are "all", "dexycb", "interhand26m", "arctic" and "ho3d".
+        vis: Whether to load RGB frames for visualization.
+        subseq_len: Length of subsequences to sample from the dataset.
+        clip_stride: Stride between subsequences.
+        min_len: Minimum length of subsequences to include.
+    """
+    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m", "ho3d"] = 'all', vis=False, subseq_len: int = 64, clip_stride: int = 8,min_len:int=32) -> None:
         if dataset_name == "all":
-            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis)
-            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis)
-            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis)
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
+            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
             if split == "train":
-                dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis)
+                dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
                 self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic, dataset_ho3d])
             else:
                 self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         else:
-            self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis)])
+            self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)])
         
 
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
@@ -609,8 +600,6 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 index -= len(ds)
 
-    
-    
     # def hamer_output(self,index):
     #     for ds in self.dataset.datasets:
     #         if index < len(ds):
@@ -625,85 +614,39 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #         else:
     #             index -= len(ds)
     
-if __name__ == "__main__":
-    # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb', vis=True)
-    # print(dataset.__getitem__(10, resize=None))
-    
-    # dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True)
+if __name__ == "__main__":    
+    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None, from_mano=True)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
+    dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=(512,512))
+    dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=(512,512))
 
-    # cfg
-    # work
-    # # pca 
-    # # wrist
-    # # evaluation
-
-    # dataset.visualize_manos_in_rgb(10, out_dir="tmp", resize=None)
-
-    # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True)
+    # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_interhand_joints", resize=None)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_interhand_manos", resize=None)
 
-    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True)
-    dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
-    dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=None)
+    # dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True)
+    # dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
+    # dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=None)
 
 
-    # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True)
+    # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_dexycb_joints", resize=None)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_dexycb_manos", resize=None)
 
-    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
-    # for i in range(len(dataset)):
-    #     sample = dataset.__getitem__(i, resize=None)
-    #     breakpoint()
-        # if sample.mask.sum().item() < 64:
-        #     breakpoint()
-    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None)
-    # dataset = HandHdf5Dataset(split='test', dataset_name='dexycb')
-    # print(f"Dataset length: {len(dataset)}")
-    # dataset.visualize_manos_in_rgb(115, out_dir="tmp")
-
-    # for dataset_name in ['dexycb', 'interhand26m', 'arctic']:
-
-    # dataset = HandHdf5Dataset(split="test", dataset_name="interhand26m", vis=True)
-    # hamer_output = dataset.hamer_output(500)
-    # sample = dataset.__getitem__(500, resize=None)
-    # dataset.visualize_hamer_output(500, out_dir="tmp_hamer")
-
-    # for frame_idx in range(len(hamer_output)):
-        
-
-    # dataset.visualize_manos_in_rgb(500, out_dir="tmp",resize=None)
-    # dataset = HandHdf5Dataset(split="test", dataset_name="dexycb", vis=True)
-    # dataset.visualize_hamer_output(200, out_dir="tmp_hamer")
-    # dataset.visualize_manos_in_rgb(200, out_dir="tmp",resize=None)
-    # for dataset_name in ['all']:
-    #     # for split in ['test','train','val']:
-    #     split='train'
-    #     img_shape = set()
-    #     dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=True)
-    #     for i in tqdm(range(100)):
-    #         sample = dataset.__getitem__(i, resize=None)
-    #         breakpoint()
-    #         img_shape.add(sample.rgb_frames.shape[1:3])
-    #     print(f"Dataset: {dataset_name}, Image shapes: {img_shape}")
-            # assert sample.mano_betas not all zero
-            # assert sample.mano_betas.abs().sum() > 1e-6, f"Sample {i} in {split} of {dataset_name} has all zero mano_betas"
-
-    # joint_3d_calculated = mano_poses2joints_3d(
-    #     mano_pose=sample.mano_pose,
-    #     mano_betas=sample.mano_betas,
-    #     mano_side=sample.mano_side,
-    #     intrinsics=sample.intrinsics,
-    #     extrinsics=sample.extrinsics,
-    # )
-    # sample.mano_joint_3d[0,0]
-    # joint_3d_calculated[0,0]
-    # hamer_output = dataset.hamer_output(0)
-    # print(f"Sample mano_betas shape: {sample.mano_betas.shape}")
-    # print(f"Sample dir: {dir(sample)}")
-    # print(sample.mano_betas.shape,sample.mano_pose.shape)
-    # print(f"Sample rgb_frames shape: {sample.rgb_frames.shape}")
-    # print(f"Sample mano_side: {sample.mano_side}")
+    # less =0
+    # more =0
+    for i in tqdm(range(len(dataset))):
+        sample = dataset.__getitem__(i, resize=None)
+        # if less ==0 and sample.mask.sum().item() < 64:
+        #     dataset.visualize_joints_in_rgb(i, out_dir="tmp_dexycb_joints", resize=None)
+        #     dataset.visualize_manos_in_rgb(i, out_dir="tmp_dexycb_manos", resize=None)
+        #     less +=1
+        #     if more >0:
+        #         break
+        # if more ==0 and sample.mask.sum().item() > 64:
+        #     dataset.visualize_joints_in_rgb(i, out_dir="tmp_dexycb_joints_more", resize=None)
+        #     dataset.visualize_manos_in_rgb(i, out_dir="tmp_dexycb_manos_more", resize=None)
+        #     more +=1
+        #     if less >0:
+        #         break
