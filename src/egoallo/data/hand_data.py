@@ -186,7 +186,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         split: Literal["train", "val", "test", "evaluation"] = "train",
         vis: bool = False,
         subseq_len: int = 64,
-        clip_stride: int = 8,
+        clip_stride: int = 64,
         min_len: int = 32,
     ) -> None:
         if dataset_name=="dexycb":

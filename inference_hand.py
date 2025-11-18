@@ -94,6 +94,7 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
                             subseq_len: int,
                             out_dir:str = "tmp",
                             fps=10, 
+                            start_frame=0,
                             resize=None,
                             ) -> None:
     os.makedirs(out_dir, exist_ok=True)
@@ -119,9 +120,9 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
     print("start making the video")
     
-    for i in range(subseq_len-2):
-        image = rgb_frames[i].numpy().astype(np.uint8)
-        composited = image
+    for i in range(subseq_len):
+        image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8),cv2.COLOR_RGB2BGR)
+        composited =  image
         for j in range(len(Trajs)):
             vertices=vertices_list[j]
             faces = faces_list[j]
@@ -170,7 +171,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/public/home/group_ucb/xuchen/handtraj/experiments/hand_train_rot_mat/v2/checkpoints_670000/")#Path("./experiments/hand_train_cond_img/v3/checkpoints_300000/")
+    checkpoint_dir: Path = Path("/public/home/group_ucb/xuchen/handtraj/experiments/hand_train_differential_clip/v2/checkpoints_300000/")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -198,13 +199,16 @@ def inference_and_visualize(
         denoiser_network,
         train_batch,
         device,
-        visualized=True):
+        visualized=True,
+        start_frame=0):
     noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
         device=device,
     )
     alpha_bar_t = noise_constants.alpha_bar_t
     alpha_t = noise_constants.alpha_t
     batch,seq_len,_ = train_batch.mano_pose.shape
+    seq_len = seq_len - start_frame
+
     train_batch.to(device)
     print(denoiser_network)
     using_mat = denoiser_network.config.using_mat
@@ -212,12 +216,12 @@ def inference_and_visualize(
     print("Using image feature: ", using_img_feat, ", using rot mat:", using_mat)
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
-        mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
-        global_orientation=train_batch.mano_pose[:,:,0:3],
-        global_translation=train_batch.mano_pose[:,:,48:],
-        mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
+        mano_poses=train_batch.mano_pose[:,start_frame:,3:48].reshape(batch,seq_len,15,3),
+        global_orientation=train_batch.mano_pose[:,start_frame:,0:3],
+        global_translation=train_batch.mano_pose[:,start_frame:,48:],
+        mano_side=train_batch.mano_side.unsqueeze(1).expand(batch, seq_len, -1),
     )
-    rel_palm_pose = train_batch.mano_pose[:,:,48:].to(device)
+    rel_palm_pose = train_batch.mano_pose[:,start_frame:,48:].to(device)
     if using_img_feat:
         cond_feat = train_batch.img_feature.to(device)
     else:
@@ -225,7 +229,7 @@ def inference_and_visualize(
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
-    if seq_len > 64:
+    if seq_len > 60:
         window_size = 64
         overlap_size = 32
         canonical_overlap_weights = (
@@ -425,7 +429,8 @@ def inference_and_visualize(
         visualize_joints_in_rgb([x_0_packed,traj],
                                 intrinsics=train_batch.intrinsics.squeeze(0),
                                 rgb_frames=train_batch.rgb_frames.squeeze(0),
-                                subseq_len = train_batch.mask.sum().cpu().numpy(),
+                                subseq_len = seq_len,
+                                start_frame=start_frame,
                                 out_dir = "tmp/visualize_hand")
         return traj
     else:
@@ -435,7 +440,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="train",dataset_name = 'ho3d',vis=True)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="train",dataset_name = 'ho3d',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -446,6 +451,7 @@ def main(args: Args) -> None:
         from hamer_helper import HamerHelper
         hamer_helper = HamerHelper()   
         for i in range(N):
+
             print("processed at index ", i)
             sample = [dataset.__getitem__(i,resize=None).to(device)] 
             keys = vars(sample[0]).keys()
@@ -543,6 +549,7 @@ def main(args: Args) -> None:
                 train_batch.append(sample)
             keys = vars(train_batch[0]).keys()
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
+            
             pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
             _,_,joints_pred = pred.apply_to_hand()
             x_0_packed = hand_network.HandDenoiseTraj(
@@ -561,14 +568,14 @@ def main(args: Args) -> None:
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
             pred_list = [x_0_packed]
-            # for i in range(3):
-            #     pred = inference_and_visualize(denoiser_network,train_batch,device,False)
-            #     pred_list.append(pred)
-            # visualize_joints_in_rgb(pred_list,
-            #                         intrinsics=train_batch.intrinsics.squeeze(0),
-            #                         rgb_frames=train_batch.rgb_frames.squeeze(0),
-            #                         subseq_len = train_batch.mask.sum().cpu().numpy(),
-            #                         out_dir = "tmp/visualize_hand")
+            for i in range(3):
+                pred = inference_and_visualize(denoiser_network,train_batch,device,False)
+                pred_list.append(pred)
+            visualize_joints_in_rgb(pred_list,
+                                    intrinsics=train_batch.intrinsics.squeeze(0),
+                                    rgb_frames=train_batch.rgb_frames.squeeze(0),
+                                    subseq_len = train_batch.mask.sum().cpu().numpy(),
+                                    out_dir = "tmp/visualize_hand")
         else:
             errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0}
             total_size = 0
