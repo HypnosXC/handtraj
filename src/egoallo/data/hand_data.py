@@ -203,7 +203,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             if split == "train":
                 self._hdf5_path = "/public/datasets/handdata/ho3d_v3.hdf5"
             elif split == "evaluation":
-                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v7.hdf5"
+                self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v11.hdf5"
             else:
                 raise ValueError("For ho3d, split should be train or evaluation")
         else:
@@ -215,6 +215,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self._subseq_len = subseq_len
         self._min_len = min_len
         json_dir = self._hdf5_path.replace('.hdf5','_json')
+
+        
         json_file_path = os.path.join(json_dir, f"{split}.json")
         self._mapping = []
         with open(json_file_path, 'r') as f:
@@ -342,6 +344,9 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 
         if from_mano:
             _, mano_joint_3d = self.get_vertices_joints(index)
+            mpjpe_frames = torch.norm(mano_joint_3d - sample.mano_joint_3d, dim=-1)
+            print("MPJPE per frame (m): ", mpjpe_frames.mean(dim=-1))
+            print("all mean: ", mpjpe_frames.mean().item())
         else:
             mano_joint_3d = sample.mano_joint_3d
         projected_joints = np.zeros((mano_joint_3d.shape[0],mano_joint_3d.shape[1], 2))
@@ -365,18 +370,9 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             out.write(composited)
         out.release()
 
-    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,debug=False) -> None:
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
         mano_vertices, _ = self.get_vertices_joints(index)
-        # if debug:
-        #     verts_json = "/public/home/group_ucb/yunqili/.cache/huggingface/hub/datasets--AnnieLiyunqi--verts_ho3d/snapshots/103cbce86985aa35997f18496f1cd3b02ede0fea/evaluation_verts.json"
-        #     with open(verts_json, 'r') as f:
-        #         verts_data = json.load(f)
-        #     verts_data = np.array(verts_data)
-        #     verts_data[:,:,1] *= -1  # flip y axis
-        #     verts_data[:,:,2] *= -1  # flip z axis
-        #     vertices = torch.tensor(verts_data[659:659+64])  # (T, 778, 3)
-        # else:
         vertices = mano_vertices  # (T, 778, 3)
         sample = self.__getitem__(index, resize=resize)
         
@@ -593,10 +589,10 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                 return ds.visualize_joints_in_rgb(index,out_dir=out_dir,resize=resize,from_mano=from_mano)
             else:
                 index -= len(ds)
-    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,debug=False) -> None:
+    def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         for ds in self.dataset.datasets:
             if index < len(ds):
-                return ds.visualize_manos_in_rgb(index,out_dir=out_dir,resize=resize,debug=debug)
+                return ds.visualize_manos_in_rgb(index,out_dir=out_dir,resize=resize)
             else:
                 index -= len(ds)
 
@@ -615,19 +611,23 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
-    # dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
-    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=None, from_mano=True)
-    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=None)
-    # dataset.visualize_joints_in_rgb(10, out_dir="tmp_ho3d_joints", resize=(512,512))
-    # dataset.visualize_manos_in_rgb(10, out_dir="tmp_ho3d_manos", resize=(512,512))
+    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
+    print("Dataset length: ", len(dataset))
+    # breakpoint()
+
+    dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
+    # dataset.visualize_joints_in_rgb(4, out_dir="ho3d_gt", resize=(512,512))
+    dataset.visualize_manos_in_rgb(40, out_dir="ho3d_from_mano", resize=(512,512))
+    # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_gt", resize=(512,512), debug=True)
+
 
     # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # dataset.visualize_joints_in_rgb(10, out_dir="tmp_interhand_joints", resize=None)
     # dataset.visualize_manos_in_rgb(10, out_dir="tmp_interhand_manos", resize=None)
 
-    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32)
-    dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
-    dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=(512,512))
+    # dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32)
+    # dataset.visualize_joints_in_rgb(11, out_dir="tmp_arctic0_joints", resize=None)
+    # dataset.visualize_manos_in_rgb(11, out_dir="tmp_arctic0_manos", resize=(512,512))
 
 
     # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
@@ -636,8 +636,8 @@ if __name__ == "__main__":
 
     # less =0
     # more =0
-    for i in tqdm(range(len(dataset))):
-        sample = dataset.__getitem__(i, resize=None)
+    # for i in tqdm(range(len(dataset))):
+    #     sample = dataset.__getitem__(i, resize=None)
         # if less ==0 and sample.mask.sum().item() < 64:
         #     dataset.visualize_joints_in_rgb(i, out_dir="tmp_dexycb_joints", resize=None)
         #     dataset.visualize_manos_in_rgb(i, out_dir="tmp_dexycb_manos", resize=None)
