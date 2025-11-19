@@ -113,19 +113,19 @@ class TrainingLossComputer:
             size=(batch,),
             device=device,
         )
-        x_t_packed_full = (
+        x_t_packed = (
             torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
         )
-        x_t_pack_half = torch.cat([x_0_packed[:, :time//2,:], x_t_packed_full[:, time//2:,:]], dim=1)
-        x_t_pack_quart = torch.cat([x_0_packed[:, :time//4,:], x_t_packed_full[:, time//4:,:]], dim=1)
-        mask_quart = (flag < 0.25).view(256, 1, 1)      # [256, 1, 1]
-        mask_half  = ((flag >= 0.25) & (flag <= 0.5)).view(256, 1, 1)
-        mask_full  = (flag > 0.5).view(256, 1, 1)
+        # x_t_pack_half = torch.cat([x_0_packed[:, :time//2,:], x_t_packed_full[:, time//2:,:]], dim=1)
+        # x_t_pack_quart = torch.cat([x_0_packed[:, :time//4,:], x_t_packed_full[:, time//4:,:]], dim=1)
+        # mask_quart = (flag < 0.25).view(256, 1, 1)      # [256, 1, 1]
+        # mask_half  = ((flag >= 0.25) & (flag <= 0.5)).view(256, 1, 1)
+        # mask_full  = (flag > 0.5).view(256, 1, 1)
 
-        x_t_packed = (mask_quart * x_t_pack_quart + 
-                      mask_half  * x_t_pack_half + 
-                      mask_full  * x_t_packed_full)
-        # Denoise.
+        # x_t_packed = (mask_quart * x_t_pack_quart + 
+        #               mask_half  * x_t_pack_half + 
+        #               mask_full  * x_t_packed_full)
+        # # Denoise.
         x_0_packed_pred = model.forward(
             x_t_packed=x_t_packed,
             t=t,

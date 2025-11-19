@@ -266,7 +266,7 @@ class HandDenoiserConfig:
         conds: HandDenoiseTraj,
     ) -> Float[Tensor, "batch time d_cond"]:
         """Construct conditioning information from CPF pose."""
-        (batch, time, _) = rel_palm_pose.shape
+        (batch, time, _) = conds.global_translation.shape
 
         # Construct device pose conditioning.
         if self.cond_param == "all":
