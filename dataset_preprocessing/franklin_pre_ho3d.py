@@ -4,7 +4,6 @@ import numpy as np
 # import torch
 # import json
 import tqdm
-
 import h5py
 from manopth.manolayer import ManoLayer
 import imageio.v3 as iio
@@ -18,10 +17,6 @@ from torch import nn
 import torch.nn.functional as F
 
 import json
-
-pca_dim=6
-
-
 class HO3D_v3(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -257,12 +252,12 @@ def worker_save_video(split, seq, idx, length):
 # A:
 # manolayer(orient,pose)
 
-
+n_comps = 6
 
 mano_layer_pca_coeff_right = ManoLayer(
     flat_hand_mean=False,
-    ncomps=pca_dim if pca_dim>0 else 45,
-    use_pca=True if pca_dim>0 else False,
+    ncomps=n_comps,
+    use_pca=True,
     side='right',
     mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models'
 )
@@ -282,7 +277,7 @@ def pca_coeffs_to_axis45(coeffs_pca: torch.Tensor, layer: ManoLayer) -> torch.Te
     elif basis.shape == (45, coeffs_pca.shape[-1]):  
         pose45 = coeffs_pca @ basis.t()              
     else:
-        raise ValueError(f"Unexpected basis shape: {basis.shape}, coeffs_pca shape: {coeffs_pca.shape}")
+        raise ValueError(f"Unexpected basis shape: {basis.shape}")
     pose45 = pose45 + mean                       
     return pose45
 
@@ -323,8 +318,8 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
         flat_hand_mean=False,       # 和你训练/使用时的配置保持一致
         side='right',               # left/right 要对上
         mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',   # 模型路径
-        ncomps=pca_dim if pca_dim>0 else 45,
-        use_pca=True if pca_dim>0 else False,
+        ncomps=n_comps,                  # 若用 PCA，这里要与下方 pose 维度匹配
+        use_pca=True,              # 也可 False（45 轴角）
         root_rot_mode='axisang',
         joint_rot_mode='axisang'
     ).to(device)
@@ -340,16 +335,12 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
         # optim_pose = torch.optim.Adam, lr=5e-2
         # optim_betas = torch.optim.Adam, lr=1e-2
         rot_dim = 3
-        pose_dim = pca_dim if pca_dim>0 else 45
+        pose_dim = (n_comps if layer.use_pca else 45)
 
         basis = layer.th_selected_comps
         mean  = layer.th_hands_mean  
-
-        if pca_dim > 0:
-            init_pose = (basis @ mean.reshape(-1,1)).reshape(pose_dim).repeat(V_obs.shape[0],1).to(device)
-        else:
-            # init_pose = mean.reshape(pose_dim).repeat(V_obs.shape[0],1).to(device)
-            init_pose = torch.zeros(V_obs.shape[0], pose_dim).to(device)
+        init_pose = (basis @ mean.reshape(-1,1)).reshape(pose_dim).repeat(V_obs.shape[0],1).to(device)
+        # init_pose = torch.zeros(V_obs.shape[0], pose_dim).to(device)
         init_rot = torch.zeros(V_obs.shape[0], 3).to(device)
         init_pose_params = torch.cat([init_rot, init_pose], dim=1)
         # pose_params = init_pose_params.clone().detach().to(device).requires_grad_(True)
@@ -471,7 +462,7 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
     with open(joint_json_file, 'r') as f:
         joint_json_data = json.load(f)
 
-    # resplit_seqs = resplit_seqs[:1]  # debug use only first 10 sequences
+    resplit_seqs = resplit_seqs[:2]  # debug use only first 10 sequences
     with h5py.File(hdf5_path, 'w') as output_hdf5:
         for idx in tqdm.tqdm(range(len(resplit_seqs)), desc="Processing evaluation split"):
             grp = output_hdf5.create_group(f"evaluation_{idx}")
@@ -506,13 +497,10 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
             out_pose_params, out_betas, out_trans = vertices_to_pose_shape(V_obs, joint_array_tensor, back_layer)     
 
             out_global_orient = out_pose_params[:, :3].cpu().numpy()  # save_length x 3
-            out_hand_pose = out_pose_params[:, 3:].cpu().numpy()  # save_length x 10
+            out_hand_pose = out_pose_params[:, 3:n_comps+3].cpu().numpy()  # save_length x 10
             out_transl = out_trans.cpu().numpy()  # save_length x 3
             # pca 15 to none pca 45
-            if pca_dim > 0:
-                out_hand_pose_45 = pca_coeffs_to_axis45(torch.FloatTensor(out_hand_pose), mano_layer_pca_coeff_right).reshape(save_length, 45)
-            else:
-                out_hand_pose_45 = torch.FloatTensor(out_hand_pose)
+            out_hand_pose_45 = pca_coeffs_to_axis45(torch.FloatTensor(out_hand_pose), mano_layer_pca_coeff_right).reshape(save_length, 45)
             pose_51_right_list = torch.cat([torch.FloatTensor(out_global_orient), out_hand_pose_45, torch.FloatTensor(out_transl)], dim=1)
             key = 'mano_poses'
             grp.create_dataset(key, data=pose_51_right_list.unsqueeze(1), dtype=dtypes[key]) # (-1, 1, 51)
@@ -573,7 +561,7 @@ if __name__ == "__main__":
     #     compression='gzip'
     # )
     save_evaluation2hdf5(
-        hdf5_path="/public/datasets/handdata/ho3d_evaluation_v11.hdf5",
+        hdf5_path="/public/home/zhangyu/test/test_seperate_trans.hdf5",
         compression='gzip'
     )
     # save_videos(split='train')

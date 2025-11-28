@@ -165,7 +165,12 @@ def render_joint(
 #         lineType=cv2.LINE_AA,  # type: ignore
 #     )
 #     return image
-
+img_feat_root = {
+    'dexycb':'/public/datasets/handdata/dexycb/img_feats_dino',
+    'interhand26m':'/public/datasets/handdata/interhand26m/data/img_feats_dino',
+    'arctic':'/public/datasets/handdata/arctic/img_feats_dino',
+    'ho3d':'/public/datasets/handdata/ho3d/img_feats_dino'
+}
 
 class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
@@ -183,7 +188,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     def __init__(
         self,
         dataset_name: str = "dexycb", # dexycb, interhand26m, arctic, ho3d
-        split: Literal["train", "val", "test", "evaluation"] = "train",
+        split: Literal["train", "val", "test"] = "train",
         vis: bool = False,
         subseq_len: int = 64,
         clip_stride: int = 64,
@@ -202,12 +207,13 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self.video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
             if split == "train":
                 self._hdf5_path = "/public/datasets/handdata/ho3d_v3.hdf5"
-            elif split == "evaluation":
+            elif split == "test":
                 self._hdf5_path = "/public/datasets/handdata/ho3d_evaluation_v11.hdf5"
             else:
-                raise ValueError("For ho3d, split should be train or evaluation")
+                raise ValueError("For ho3d, split should be train or test")
         else:
             raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
+        self.img_feat_root = os.path.join(img_feat_root[dataset_name], split)
         self.split = split
         self.dataset_name = dataset_name
         self.vis = vis
@@ -323,16 +329,21 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     kwargs["rgb_frames"] = torch.ones((clip_len), dtype=torch.uint8)
                 else:
                     kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
-
-            if self._subseq_len == -1:
-                kwargs['img_feature'] = torch.zeros((clip_len, 1280))
-            else:
-                kwargs['img_feature'] = torch.zeros((self._subseq_len, 1280))
-            kwargs['img_feature'] = kwargs['img_feature'].cpu()
+        # load img features
+        img_feat_path = os.path.join(self.img_feat_root, f'imgfeat_{group_name}.pt')
+        assert os.path.exists(img_feat_path), f"Image feature file not found: {img_feat_path}"
+        img_features = torch.load(img_feat_path)  # T, feat_dim(768)
+        if self._subseq_len == -1:
+            kwargs['img_feature'] = img_features
+        else:
+            kwargs['img_feature'] = img_features[start_idx:start_idx+clip_len]
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
         return self.N
+
+    def get_mapping(self):
+        return self._mapping
 
     def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,from_mano=False) -> None:
         os.makedirs(out_dir, exist_ok=True)
@@ -542,7 +553,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 
     Args:
         split: "train", "val" or "test" splits to include in the dataset. For ho3d,
-            use "train" and "evaluation".
+            use "train" and "test".
         dataset_name: Name of the dataset to load. Options are "all", "dexycb", "interhand26m", "arctic" and "ho3d".
         vis: Whether to load RGB frames for visualization.
         subseq_len: Length of subsequences to sample from the dataset.
@@ -554,7 +565,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
             dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
             dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
-            if split == "train":
+            if split == "train" or split == "test":
                 dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
                 self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic, dataset_ho3d])
             else:
@@ -596,6 +607,12 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 index -= len(ds)
 
+    def get_mapping(self):
+        mapping = []
+        for ds in self.dataset.datasets:
+            mapping.extend([(ds.dataset_name,item[0], item[1], item[2]) for item in ds.get_mapping()])
+        return mapping
+
     # def hamer_output(self,index):
     #     for ds in self.dataset.datasets:
     #         if index < len(ds):
@@ -611,13 +628,13 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
-    dataset = HandHdf5Dataset(split='evaluation', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
-    print("Dataset length: ", len(dataset))
+    # dataset = HandHdf5Dataset(split='test', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
+    # print("Dataset length: ", len(dataset))
     # breakpoint()
 
-    dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
+    # dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
     # dataset.visualize_joints_in_rgb(4, out_dir="ho3d_gt", resize=(512,512))
-    dataset.visualize_manos_in_rgb(40, out_dir="ho3d_from_mano", resize=(512,512))
+    # dataset.visualize_manos_in_rgb(40, out_dir="ho3d_from_mano", resize=(512,512))
     # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_gt", resize=(512,512), debug=True)
 
 
@@ -636,8 +653,10 @@ if __name__ == "__main__":
 
     # less =0
     # more =0
-    # for i in tqdm(range(len(dataset))):
-    #     sample = dataset.__getitem__(i, resize=None)
+    for split in ['train','val','test']:
+        dataset = HandHdf5Dataset(split=split, dataset_name='all', vis=False, subseq_len=64, clip_stride=64, min_len=32)
+        for i in tqdm(range(len(dataset))):
+            sample = dataset.__getitem__(i, resize=None)
         # if less ==0 and sample.mask.sum().item() < 64:
         #     dataset.visualize_joints_in_rgb(i, out_dir="tmp_dexycb_joints", resize=None)
         #     dataset.visualize_manos_in_rgb(i, out_dir="tmp_dexycb_manos", resize=None)
