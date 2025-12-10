@@ -27,7 +27,7 @@ class HO3D_v3(torch.utils.data.Dataset):
         self,
         # img_dir: Path="/public/datasets/handdata/interhand26m/data/InterHand2.6M_30fps_batch1/images",
         # anno_dir: Path="/public/datasets/handdata/interhand26m/anno/annotation",
-        data_root="/public/datasets/handdata/HO3D_v3",
+        data_root="/data-share/share/HO3D/HO3D_v3",
         split: Literal["train"] = "train",
     ) -> None:
         start_time = time.time()
@@ -125,7 +125,7 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
         flat_hand_mean=True,
         ncomps=45,
         side='right',
-        mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+        mano_root="/data-share/share/handdata/mano/",
     )
     dict_file_train = {}
     str_dt = h5py.string_dtype('utf-8', None)
@@ -233,19 +233,21 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
 
             print(f"→ Split '{split}' saved {len(dataset)} samples to HDF5.")
 
+
+
     json_path = os.path.join(json_dir, 'train.json')
     with open(json_path, 'w') as f:
         json.dump(dict_file_train, f, indent=4)
     return
 
 def worker_save_video(split, seq, idx, length):
-    video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
+    video_root = "/data-share/share/handdata/preprocessed/ho3d/picked_videos"
     video_name = f"seq{seq}_start{idx}_len{length}.mp4"
     video_path = os.path.join(video_root, split, video_name)
     if os.path.exists(video_path):
         return
     all_frames = []
-    rgb_dir = os.path.join("/public/datasets/handdata/HO3D_v3", split, seq, 'rgb')
+    rgb_dir = os.path.join("/data-share/share/HO3D/HO3D_v3", split, seq, 'rgb')
     for idx in range(idx, idx + length):
         frame_path = os.path.join(rgb_dir, f"{idx:04d}.jpg")
         image = iio.imread(frame_path)
@@ -264,7 +266,7 @@ mano_layer_pca_coeff_right = ManoLayer(
     ncomps=pca_dim if pca_dim>0 else 45,
     use_pca=True if pca_dim>0 else False,
     side='right',
-    mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models'
+    mano_root="/data-share/share/handdata/mano/"
 )
 
 @torch.no_grad()
@@ -322,7 +324,7 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
     back_layer = ManoLayer(
         flat_hand_mean=False,       # 和你训练/使用时的配置保持一致
         side='right',               # left/right 要对上
-        mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',   # 模型路径
+        mano_root="/data-share/share/handdata/mano/",   # 模型路径
         ncomps=pca_dim if pca_dim>0 else 45,
         use_pca=True if pca_dim>0 else False,
         root_rot_mode='axisang',
@@ -424,7 +426,7 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
         pose_params = torch.cat([init_rot, init_pose], dim=1)
         return pose_params.detach().cpu(), betas.detach().cpu(), trans.detach().cpu()
 
-    evaluation_txt = "/public/datasets/handdata/HO3D_v3/evaluation.txt"
+    evaluation_txt = "/data-share/share/HO3D/HO3D_v3/evaluation.txt"
     eval_file_list = []
     with open(evaluation_txt, 'r') as f:
         lines = f.readlines()
@@ -463,11 +465,11 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
         'video_name': str_dt,
     }
     
-    json_eval_file = "/public/home/group_ucb/yunqili/code/handtraj/ho3d_evaluation_verts.json"
+    json_eval_file = "/data-share/share/handdata/ho3d/evaluation_verts.json"
     with open(json_eval_file, 'r') as f:
         json_data = json.load(f)
     
-    joint_json_file = "/public/datasets/handdata/HO3D_v3/evaluation_xyz.json"
+    joint_json_file = "/data-share/share/handdata/ho3d/evaluation_xyz.json"
     with open(joint_json_file, 'r') as f:
         joint_json_data = json.load(f)
 
@@ -530,7 +532,7 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
             key = 'mano_side'
             grp.create_dataset(key, data='right', dtype=dtypes[key])
 
-            data_root="/public/datasets/handdata/HO3D_v3"
+            data_root="/data-share/share/HO3D/HO3D_v3"
             meta_file = os.path.join(data_root, 'evaluation', seq_name, 'meta', f"{start_idx:04d}.pkl")
             with open(meta_file, 'rb') as f:
                 meta_data = pickle.load(f)
@@ -549,7 +551,7 @@ def save_evaluation2hdf5(hdf5_path, compression: str = 'gzip'):
         json.dump(dict_file_evaluation, f, indent=4)
     task_list = [( 'evaluation', seq, idx,length) for (eval_idx, seq, idx, length) in resplit_seqs]
     num_workers = 32
-    os.makedirs(os.path.join("/public/datasets/handdata/HO3D_v3_new/picked_videos_v2", 'evaluation'), exist_ok=True)
+    os.makedirs(os.path.join("/data-share/share/handdata/preprocessed/ho3d/picked_videos", 'evaluation'), exist_ok=True)
     with mp.Pool(num_workers) as pool:
         list(tqdm.tqdm(pool.starmap(worker_save_video, task_list), total=len(task_list), desc=f"Saving evaluation videos"))
 
@@ -558,7 +560,7 @@ import multiprocessing as mp
 
 def save_videos(split = "train"):
     dataset = HO3D_v3(split=split)
-    video_root = "/public/datasets/handdata/HO3D_v3_new/picked_videos_v2"
+    video_root = "/data-share/share/handdata/preprocessed/ho3d/picked_videos"
     split_video_root = os.path.join(video_root, split)
     os.makedirs(split_video_root, exist_ok=True)
     task_list = [(split, seq, idx,length) for (seq, idx, length) in dataset._mapping]
@@ -567,13 +569,14 @@ def save_videos(split = "train"):
     with mp.Pool(num_workers) as pool:
         list(tqdm.tqdm(pool.starmap(worker_save_video, task_list), total=len(task_list), desc=f"Saving {split} videos"))
 
+
 if __name__ == "__main__":
     # save_splits2hdf5(
-    #     hdf5_path="/public/datasets/handdata/ho3d_v3.hdf5",
+    #     hdf5_path="/data-share/share/handdata/preprocessed/ho3d/ho3d_train.hdf5",
     #     compression='gzip'
     # )
-    save_evaluation2hdf5(
-        hdf5_path="/public/datasets/handdata/ho3d_evaluation_v11.hdf5",
-        compression='gzip'
-    )
-    # save_videos(split='train')
+    # save_evaluation2hdf5(
+    #     hdf5_path="/data-share/share/handdata/preprocessed/ho3d/ho3d_evaluation.hdf5",
+    #     compression='gzip'
+    # )
+    save_videos(split='train')

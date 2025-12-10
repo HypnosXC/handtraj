@@ -6,10 +6,10 @@ from glob import glob
 from tqdm import tqdm
 import os
 # mano_ps = glob(f"/public/datasets/handdata/arctic/unpack/arctic_data/data/raw_seqs/*/*.mano.npy")
-raw_seq_path = "/public/datasets/handdata/arctic/unpack/arctic_data/data/raw_seqs"
-cropped_img_path = "/public/datasets/handdata/arctic/unpack/arctic_data/data/cropped_images"
+raw_seq_path = "/data-share/share/handdata/arctic/unpack/arctic_data/data/raw_seqs"
+cropped_img_path = "/data-share/share/handdata/arctic/unpack/arctic_data/data/cropped_images"
 # pbar = tqdm(mano_ps)
-misc_p = "/public/datasets/handdata/arctic/unpack/arctic_data/data/meta/misc.json"
+misc_p = "/data-share/share/handdata/arctic/unpack/arctic_data/data/meta/misc.json"
 import json
 with open(misc_p, "r") as f:
     misc = json.load(f)
@@ -46,7 +46,7 @@ dict_file_list={
 import imageio.v2 as iio
 import cv2
 
-resplit_p = "/public/datasets/handdata/arctic/record_arctic_valid_seqs_32_64_resplit_xxx.json"
+resplit_p = "/data-share/share/handdata/preprocessed/record_arctic_valid_seqs_32_64_resplit_xxx.json"
 
 with open(resplit_p, "r") as f:
     resplit_dict = json.load(f)
@@ -76,7 +76,7 @@ def cal_root_j(th_betas, layer: ManoLayer) -> torch.Tensor:
     th_j = torch.matmul(layer.th_J_regressor, th_v_shaped)
     return th_j[:, 0, :].contiguous().view(3, 1)
 
-mano_model_folder = "/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano"
+mano_model_folder = "/data-share/share/handdata/mano/"
 mano_layer_right = ManoLayer(
     flat_hand_mean=False,
     ncomps=45,
@@ -132,7 +132,7 @@ def worker(idx_info):
         }}
         idx, s_idx, mano_name, start_idx, saved_length, cam_id = idx_info
         this_mano_p = os.path.join(raw_seq_path, s_idx, f"{mano_name}.mano.npy")
-        this_processed_p = os.path.join('/public/datasets/handdata/arctic/outputs/processed/seqs', s_idx, f"{mano_name}.npy")
+        this_processed_p = os.path.join('/data-share/share/handdata/arctic/outputs/processed/seqs', s_idx, f"{mano_name}.npy")
         # if not os.path.exists(this_processed_p):
         #     breakpoint()
         processed_data = np.load(this_processed_p, allow_pickle=True).item()

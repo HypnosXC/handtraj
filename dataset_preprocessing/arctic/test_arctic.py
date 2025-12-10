@@ -5,10 +5,10 @@ from glob import glob
 from tqdm import tqdm
 import os
 # mano_ps = glob(f"/public/datasets/handdata/arctic/unpack/arctic_data/data/raw_seqs/*/*.mano.npy")
-raw_seq_path = "/public/datasets/handdata/arctic/unpack/arctic_data/data/raw_seqs"
-cropped_img_path = "/public/datasets/handdata/arctic/unpack/arctic_data/data/cropped_images"
+raw_seq_path = "data-share/share/handdata/arctic/unpack/arctic_data/data/raw_seqs"
+cropped_img_path = "/data-share/share/handdata/arctic/unpack/arctic_data/data/cropped_images"
 # pbar = tqdm(mano_ps)
-misc_p = "/public/datasets/handdata/arctic/unpack/arctic_data/data/meta/misc.json"
+misc_p = "/data-share/share/handdata/arctic/unpack/arctic_data/data/meta/misc.json"
 import json
 with open(misc_p, "r") as f:
     misc = json.load(f)
@@ -59,7 +59,7 @@ shapes = {
     'mano_joint_3d':(64, 1, 21, 3),  # 64 frames, 21 joints, 3D coordinates
     'video_name': (1,),  # single video name
 }
-hdf5_path="/public/datasets/handdata/arctic.hdf5"
+hdf5_path="/data-share/share/handdata/preprocessed/arctic/arctic.hdf5"
 
 # mappings={
 #     'train': [],
@@ -71,11 +71,10 @@ import imageio.v2 as iio
 import cv2
 
 # with h5py.File(hdf5_path, 'w') as f:
-save_mp4_root = "/public/datasets/handdata/arctic/picked_videos"
+save_mp4_root = "/data-share/share/handdata/preprocessed/arctic/picked_videos"
 
-resplit_p = "/public/datasets/handdata/arctic/record_arctic_valid_seqs_32_64_resplit_xxx.json"
-img_root = "/public/datasets/handdata/arctic/unpack/arctic_data/data/cropped_images"
-
+resplit_p = "/data-share/share/handdata/preprocessed/arctic/record_arctic_valid_seqs_32_64_resplit_xxx.json"
+img_root = "/data-share/share/handdata/arctic/unpack/arctic_data/data/cropped_images"
 
 def write_video(args):
     good_list = []

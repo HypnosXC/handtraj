@@ -44,79 +44,100 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
-# # range_hand = {
-# #     "right":slice(0, 21),
-# #     "left": slice(21, 42)
-# # }
-# # capture_cnt = {
-# #     "train":10,
-# #     "val":1,
-# #     "test":2
-# # }
-# # record_bad_data = []
-# # bad_data_file = "/public/datasets/handdata/interhand26m/anno/interhand_bad_data.txt"
-
 list_processed_path = "/data-share/share/handdata/preprocessed/resplit_ih26_v4.json"
 anno_dir = "/data-share/share/handdata/interhand/download/anno/annotations"
+
 with open(list_processed_path, 'r') as f:
     processed_list = json.load(f)
+
+original_joints={}
+original_cams = {}
+original_manos = {}
 for split in ["train","val","test"]:
-    split_list = processed_list[split]
-    unprocessed_mano_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_MANO_NeuralAnnot.json')
-    with open(unprocessed_mano_dir, 'r') as f:
-        unprocessed_mano = json.load(f)
+    original_joint_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_joint_3d.json')
+    original_mano_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_MANO_NeuralAnnot.json')
     camera_dir = os.path.join(anno_dir , split, f'InterHand2.6M_{split}_camera.json')
+    with open(original_joint_dir, 'r') as f:
+        original_joints[split] = json.load(f)
+    with open(original_mano_dir, 'r') as f:
+        original_manos[split] = json.load(f)
     with open(camera_dir, 'r') as f:
-        camera_data = json.load(f)
-    original_cam_mano_dir = os.path.join(anno_dir, split, f'seq_{split}_camera_mano_resplit.json')
-    with open(original_cam_mano_dir, 'r') as f:
-        original_cam_mano = json.load(f)
-    for idx in tqdm(range(len(split_list)), desc=f"Checking {split} split"):
-        # new_cal_cam_mano = 
-        item = processed_list[split][idx]
-        breakpoint()
-        frame_list = item['frames']
-        original_split, cap_idx, seq, cam, start_idx, save_length, hand_type = item['info']
-        unprocessed_this_mano = unprocessed_mano[str(cap_idx)][str(int(frame_list[start_idx]))][hand_type]
-        original_this_cam_mano = original_cam_mano[idx]
-        original_cam_mano_pose = original_this_cam_mano['pose'][0]
-        unprocessed_mano_pose = torch.FloatTensor(unprocessed_this_mano['pose']).view(1,-1)
-        camrot_list = camera_data[str(cap_idx)]['camrot'][cam]
-        campos_list = camera_data[str(cap_idx)]['campos'][cam]
+        original_cams[split] = json.load(f)
+
+range_hand = {
+    "right":slice(0, 21),
+    "left": slice(21, 42)
+}
+capture_cnt = {
+    "train":10,
+    "val":1,
+    "test":2
+}
+
+img_dir="/data-share/share/handdata/interhand/download/InterHand2.6M_30fps_batch1/images"
+
+for split in ["train","val","test"]:
+    new_cam_mano_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_camera_mano.json')
+    # original_joint_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_joint_3d.json')
+    new_cam_joint_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_camera_joint.json')
+    # camera_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_camera.json')
+    split_processed_list = processed_list[split]
+    new_mano_data = []
+    new_joint_data = []
+
+    for this_seq_data in tqdm(split_processed_list, desc=f"Processing {split} split"):
+        original_split, cap_idx, seq, cam, start_idx, save_length, hand_type = this_seq_data
+        new_this_mano_data = {"shape": [], "pose": []} # (10) , (T,51)
+        new_this_joint_data = {"joint": []} # (T,21,3)
+        camrot_list = original_cams[original_split][str(cap_idx)]['camrot'][cam]
+        campos_list = original_cams[original_split][str(cap_idx)]['campos'][cam]
         camrot = np.array(camrot_list).reshape(3,3)
         campos = np.array(campos_list).reshape(3)/1000
         cam2world_rot = torch.FloatTensor(camrot)
         cam2world_trans = -cam2world_rot @ torch.FloatTensor(campos).reshape(3,1)
-        
-        # extrinsics_matrix = torch.zeros((4,4))
-        # extrinsics_matrix[:3,:3] = cam2world_rot
-        # extrinsics_matrix[:3,3] = cam2world_trans.reshape(3)
+        frame_list = os.listdir(os.path.join(img_dir, original_split, f'Capture{cap_idx}', seq, f'cam{cam}'))
+        frame_list = sorted([int(x.split('.')[0].split('image')[1]) for x in frame_list])[start_idx:start_idx+save_length]
+
+        for frame_idx in frame_list:
+            this_joint_data = original_joints[original_split][str(cap_idx)][str(int(frame_idx))]
+            this_mano_data = original_manos[original_split][str(cap_idx)][str(int(frame_idx))]
+            joint_world = np.array(this_joint_data['world_coord']).reshape(-1,3)
+            joint_part = joint_world[range_hand[hand_type]]
+
+            mano_betas = torch.FloatTensor(this_mano_data[hand_type]['shape']).view(-1)
+            mano_pose = torch.FloatTensor(this_mano_data[hand_type]['pose']).view(1,-1)
+            mano_rot,_ = cv2.Rodrigues(mano_pose[0,:3].numpy())
+            mano_rot = torch.FloatTensor(mano_rot)
+            mano_trans = torch.FloatTensor(this_mano_data[hand_type]['trans']).reshape(3,1)
+            cam2mano_rot = cam2world_rot @ mano_rot
+            cam2mano_trans = cam2world_trans + cam2world_rot @ mano_trans
+            mano_rot_angle,_ = cv2.Rodrigues(cam2mano_rot.numpy())
+            mano_rot_angle = torch.FloatTensor(mano_rot_angle.reshape(3))
+            mano_pose[0,:3] = torch.FloatTensor(mano_rot_angle.reshape(3))
+
+            if hand_type=='right':
+                mano_pose[:,3:48] = add_mean_pose45(mano_pose[:,3:48], mano_layer_right)
+                root_j = cal_root_j(mano_betas.unsqueeze(0), mano_layer_right)
+            else:
+                mano_pose[:,3:48] = add_mean_pose45(mano_pose[:,3:48], mano_layer_left)
+                root_j = cal_root_j(mano_betas.unsqueeze(0), mano_layer_left)
+            delta = -root_j + torch.tensor(cam2world_rot,dtype=root_j.dtype) @ root_j
+            mano_pose = torch.cat([mano_pose,cam2mano_trans.reshape(1,3) + delta.reshape(1,3)], dim=1)
+            new_this_mano_data['pose'].append(mano_pose.numpy().reshape(-1).tolist())
+            new_this_mano_data['shape'].append(mano_betas.numpy().reshape(-1).tolist())
+            joint_cam = cam2world_rot @ torch.FloatTensor(joint_part.T/1000) + cam2world_trans
+            joint_cam = joint_cam.T.numpy()
+            new_this_joint_data['joint'].append(joint_cam.reshape(-1).tolist())
+                
+
+        new_mano_data.append(new_this_mano_data)
+        new_joint_data.append(new_this_joint_data)
+    with open(new_cam_mano_dir, 'w') as f:
+        json.dump(new_mano_data, f)
+    with open(new_cam_joint_dir, 'w') as f:
+        json.dump(new_joint_data, f)
 
 
-        breakpoint()
-        mano_rot,_ = cv2.Rodrigues(unprocessed_mano_pose[0,:3].numpy())
-        mano_rot = torch.FloatTensor(mano_rot)
-        mano_trans = torch.FloatTensor(unprocessed_this_mano['trans']).reshape(3,1)
-        cam2mano_rot = cam2world_rot @ mano_rot
-        cam2mano_trans = cam2world_trans + cam2world_rot @ mano_trans
-        mano_rot_angle,_ = cv2.Rodrigues(cam2mano_rot.numpy())
-        mano_rot_angle = torch.FloatTensor(mano_rot_angle.reshape(3))
-        mano_pose = torch.zeros((1,48))
-        mano_pose[0,:3] = torch.FloatTensor(mano_rot_angle.reshape(3))
-        if hand_type=='right':
-            mano_pose[:,3:48] = add_mean_pose45(mano_pose[:,3:48], mano_layer_right)
-            root_j = cal_root_j(torch.FloatTensor(unprocessed_this_mano['shape']).view(-1).unsqueeze(0), mano_layer_right)
-        else:
-            mano_pose[:,3:48] = add_mean_pose45(mano_pose[:,3:48], mano_layer_left)
-            root_j = cal_root_j(torch.FloatTensor(unprocessed_this_mano['shape']).view(-1).unsqueeze(0), mano_layer_left)
-        delta = -root_j + torch.tensor(cam2world_rot,dtype=root_j.dtype) @ root_j
-        mano_pose = torch.cat([mano_pose,cam2mano_trans.reshape(1,3) + delta.reshape(1,3)], dim=1)
-
-
-# #     cam_mano_dir = os.path.join("/public/datasets/handdata/interhand26m/anno/annotation", split, f'InterHand2.6M_{split}_camera_mano.json')
-# #     original_joint_dir = os.path.join("/public/datasets/handdata/interhand26m/anno/annotation", split, f'InterHand2.6M_{split}_joint_3d.json')
-# #     cam_joint_dir = os.path.join("/public/datasets/handdata/interhand26m/anno/annotation", split, f'InterHand2.6M_{split}_camera_joint.json')
-# #     camera_dir = os.path.join("/public/datasets/handdata/interhand26m/anno/annotation", split, f'InterHand2.6M_{split}_camera.json')
 # #     with open(original_mano_dir, 'r') as f:
 # #         original_mano_data = json.load(f)
 # #     with open(original_joint_dir, 'r') as f:
@@ -244,10 +265,6 @@ for split in ["train","val","test"]:
 # #         json.dump(new_mano_data, f)
 # #     with open(cam_joint_seq_path, 'w') as f:
 # #         json.dump(new_joint_data, f)
-
-
-
-
 # train_cam_mano_seq_path = os.path.join(anno_dir, 'train', 'seq_train_camera_mano.json')
 # val_cam_mano_seq_path = os.path.join(anno_dir, 'val', 'seq_val_camera_mano.json')
 # test_cam_mano_seq_path = os.path.join(anno_dir, 'test', 'seq_test_camera_mano.json')

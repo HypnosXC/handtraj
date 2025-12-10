@@ -1,7 +1,7 @@
 import os
 # import yaml
 import numpy as np
-# import torch
+# import torchq 1
 # import json
 import tqdm
 
@@ -16,21 +16,20 @@ from typing import Any, Literal
 import time
 # with open("/public/datasets/handdata/interhand26m/anno/annotation/val/InterHand2.6M_val_data.json", 'r') as f:
 #     val_data = json.load(f)
-
+img_dir="/data-share/share/handdata/interhand/download/InterHand2.6M_30fps_batch1/images"
 import json
 class Interhand2_6M(torch.utils.data.Dataset):
     def __init__(
         self,
-        img_dir: Path="/public/datasets/handdata/interhand26m/data/InterHand2.6M_30fps_batch1/images",
-        anno_dir: Path="/public/datasets/handdata/interhand26m/anno/annotation",
+        anno_dir="/data-share/share/handdata/interhand/download/anno/annotations",
         split: Literal["train", "val", "test"] = "train",
     ) -> None:
         start_time = time.time()
-        self.save_mp4_dir = os.path.join("/public/datasets/handdata/interhand26m/data/picked_videos",split)
+        self.save_mp4_dir = os.path.join("/data-share/share/handdata/preprocessed/interhand26m/picked_videos",split)
         self.mp4_format = "original_{}_Capture{}_{}_cam{}_{}_{}_{}.mp4" # cap_idx, seq, cam, start_idx, length_this, hand_type
-        record_split_seqs_32_list = os.path.join(anno_dir, "..", "resplit_ih26_v4.json")
-        cam_mano_dir = os.path.join(anno_dir, split, f'seq_{split}_camera_mano_resplit.json')
-        cam_joint_dir = os.path.join(anno_dir, split, f'seq_{split}_camera_joint_resplit.json')
+        record_split_seqs_32_list = "/data-share/share/handdata/preprocessed/resplit_ih26_v4.json"
+        cam_mano_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_camera_mano.json')
+        cam_joint_dir = os.path.join(anno_dir, split, f'InterHand2.6M_{split}_camera_joint.json')
         cam_dirs = {
             "train":os.path.join(anno_dir, 'train', 'InterHand2.6M_train_camera.json'),
             "val":os.path.join(anno_dir, 'val', 'InterHand2.6M_val_camera.json'),
@@ -61,14 +60,14 @@ class Interhand2_6M(torch.utils.data.Dataset):
             flat_hand_mean=True,
             ncomps=45,
             side='left',
-            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+            mano_root="/data-share/share/handdata/mano/",
         )
         self.right_mano_layer = ManoLayer(
             use_pca=False,
             flat_hand_mean=True,
             ncomps=45,
             side='right',
-            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+            mano_root="/data-share/share/handdata/mano/",
         )
         print(f"Dataset initialized with {self.N} samples. Time taken: {time.time() - start_time:.2f} seconds")
 
@@ -170,6 +169,34 @@ def plot_distribution(data):
     plt.savefig(f"frame_count_distribution.png")
     plt.clf()
 
+import multiprocessing as mp
+num_workers = 8
+
+def worker_save_video(split, video_name):
+    video_root = "/data-share/share/handdata/preprocessed/interhand26m/picked_videos"
+    video_path = os.path.join(video_root, split, video_name)
+    if os.path.exists(video_path):
+        return
+    all_frames = []
+    # f"original_{}_Capture{}_{}_cam{}_{}_{}_{}.mp4".format(original_split,cap_idx, seq, cam, start_idx, save_length, hand_type)
+    original_split = video_name.split('original_')[1].split('_Capture')[0]
+    cap_idx_str = video_name.split('_')[2]
+    seq = video_name.split(f'_{cap_idx_str}_')[1].split('_cam')[0]
+    cam = f"cam{video_name.split(f'_cam')[1].split('_')[0]}"
+    start_idx = int(video_name.split(f'_{cam}_')[1].split('_')[0])
+    length = int(video_name.split(f'_{cam}_{start_idx}_')[1].split('_')[0])
+    hand_type = video_name.split(f'_{cam}_{start_idx}_{length}_')[1].split('.mp4')[0]
+    
+    rgb_dir = os.path.join(img_dir, original_split, cap_idx_str, seq, cam)
+    frame_list = os.listdir(rgb_dir)
+    frame_list = [f.split('.')[0].split('image')[-1] for f in frame_list]
+    frame_list = sorted(frame_list, key=lambda x:int(x))[start_idx:start_idx+length]
+    for frame in frame_list:
+        frame_path = os.path.join(rgb_dir, f"image{frame}.jpg")
+        image = iio.imread(frame_path)
+        all_frames.append(image)
+    iio.imwrite(video_path, all_frames, fps=30, codec="libx264", macro_block_size=None)
+
 def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
     json_dir = hdf5_path.replace('.hdf5','_json')
     os.makedirs(json_dir, exist_ok=True)
@@ -194,10 +221,13 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
         'test': {}
     }
     interhand2mano_idx = [20, 3, 2, 1, 0, 7, 6 ,5,4,11,10,9,8,15,14,13,12,19,18,17,16]
-
+    task_list = []
+    
     with h5py.File(hdf5_path, 'w') as output_hdf5:
         for split in ['train', 'val', 'test']:
             # print(f"Processing split '{split}'...")
+            save_mp4_dir = os.path.join("/data-share/share/handdata/preprocessed/interhand26m/picked_videos",split)
+            os.makedirs(save_mp4_dir, exist_ok=True)
             dataset = Interhand2_6M(split=split)
             # N = len(dataset)
             # grp = f.create_group(split)
@@ -212,12 +242,16 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
             #         chunks=chunks
             #     )
             for idx in tqdm.tqdm(range(len(dataset)), desc=f"Processing {split} split"):
+            # for idx in tqdm.tqdm(range(10), desc=f"Processing {split} split"):
                 group_name = f"{split}_{idx}"
                 sample = dataset[idx]
                 dict_file_list[split][group_name] = len(sample['mano_poses'])
                 group = output_hdf5.create_group(group_name)
                 # Write data_dir
                 key = 'video_name'
+                mp4_path = os.path.join(save_mp4_dir, sample['video_name'])
+                if not os.path.exists(mp4_path):
+                    task_list.append((split, sample['video_name']))
                 group.create_dataset(key, data=sample['video_name'], dtype=dtypes[key])
                 # ds_mano_poses = grp['mano_poses']
                 # ds_mano_poses = sample['mano_pose'].unsqueeze(1)
@@ -247,6 +281,9 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
     for split in ['train', 'val', 'test']:
         with open(os.path.join(json_dir, f"{split}.json"), 'w') as jf:
             json.dump(dict_file_list[split], jf)  
+    with mp.Pool(num_workers) as pool:
+        list(tqdm.tqdm(pool.starmap(worker_save_video, task_list), total=len(task_list), desc=f"Saving evaluation videos"))
+
 
                     
 
@@ -366,7 +403,7 @@ def save_splits2hdf5(hdf5_path, compression: str = 'gzip'):
 
 if __name__ == "__main__":
     save_splits2hdf5(
-        hdf5_path="/public/datasets/handdata/interhand26m_v4.hdf5",
+        hdf5_path="/data-share/share/handdata/preprocessed/interhand26m/interhand26m.hdf5",
         compression='gzip'
     )
     # for split in ['train', 'val', 'test']:

@@ -24,6 +24,19 @@ _SUBJECTS = [
     '20201022-subject-10',
 ]
 
+_SUBJECTS_PATHS = [
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200709-subject-01",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200813-subject-02",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200820-subject-03",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200903-subject-04",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200908-subject-05",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200918-subject-06",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20200928-subject-07",
+    "/data-share/share/handdata/dexycb/franklin_unzipped/20201002-subject-08",
+    "/data-share/share/dexycb/20201015-subject-09",
+    "/data-share/share/dexycb/20201022-subject-10",
+]
+
 _SERIALS = [
     '836212060125',
     '839512060362',
@@ -101,7 +114,7 @@ class DexYCBDataset():
   mano_joints = _MANO_JOINTS
   mano_joint_connect = _MANO_JOINT_CONNECT
 
-  def __init__(self, split, data_dir="/public/datasets/handdata/dexycb", setup="s_all_unseen"):
+  def __init__(self, split, data_dir="/data-share/share/handdata/dexycb/franklin_unzipped", setup="s_all_unseen"):
     """Constructor.
 
     Args:
@@ -133,67 +146,67 @@ class DexYCBDataset():
         for k, v in _YCB_CLASSES.items()
     }
 
-    # Seen subjects, camera views, grasped objects.
-    if self._setup == 's0':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 != 4]
-      if self._split == 'val':
-        subject_ind = [0, 1]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 == 4]
-      if self._split == 'test':
-        subject_ind = [2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 == 4]
+    # # Seen subjects, camera views, grasped objects.
+    # if self._setup == 's0':
+    #   if self._split == 'train':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [i for i in range(100) if i % 5 != 4]
+    #   if self._split == 'val':
+    #     subject_ind = [0, 1]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [i for i in range(100) if i % 5 == 4]
+    #   if self._split == 'test':
+    #     subject_ind = [2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [i for i in range(100) if i % 5 == 4]
 
-    # Unseen subjects.
-    if self._setup == 's1':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
-      if self._split == 'val':
-        subject_ind = [6]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
-      if self._split == 'test':
-        subject_ind = [7, 8]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
+    # # Unseen subjects.
+    # if self._setup == 's1':
+    #   if self._split == 'train':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = list(range(100))
+    #   if self._split == 'val':
+    #     subject_ind = [6]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = list(range(100))
+    #   if self._split == 'test':
+    #     subject_ind = [7, 8]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = list(range(100))
 
-    # Unseen camera views.
-    if self._setup == 's2':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5]
-        sequence_ind = list(range(100))
-      if self._split == 'val':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [6]
-        sequence_ind = list(range(100))
-      if self._split == 'test':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [7]
-        sequence_ind = list(range(100))
+    # # Unseen camera views.
+    # if self._setup == 's2':
+    #   if self._split == 'train':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5]
+    #     sequence_ind = list(range(100))
+    #   if self._split == 'val':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [6]
+    #     sequence_ind = list(range(100))
+    #   if self._split == 'test':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [7]
+    #     sequence_ind = list(range(100))
 
-    # Unseen grasped objects.
-    if self._setup == 's3':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [
-            i for i in range(100) if i // 5 not in (3, 7, 11, 15, 19)
-        ]
-      if self._split == 'val':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i // 5 in (3, 19)]
-      if self._split == 'test':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i // 5 in (7, 11, 15)]
+    # # Unseen grasped objects.
+    # if self._setup == 's3':
+    #   if self._split == 'train':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [
+    #         i for i in range(100) if i // 5 not in (3, 7, 11, 15, 19)
+    #     ]
+    #   if self._split == 'val':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [i for i in range(100) if i // 5 in (3, 19)]
+    #   if self._split == 'test':
+    #     subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    #     serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
+    #     sequence_ind = [i for i in range(100) if i // 5 in (7, 11, 15)]
 
     # 新的设置：所有未见
     if self._setup == 's_all_unseen':
@@ -210,12 +223,15 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        # meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                        #                          sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        meta_file = os.path.join(_SUBJECTS_PATHS[id_sub], sorted(os.listdir(_SUBJECTS_PATHS[id_sub]))[id_seq],"meta.yml")
+                        
                         with open(meta_file, 'r') as f:
                             meta = yaml.load(f, Loader=yaml.FullLoader)
                         num_frames = meta['num_frames']
-                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        # this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = _SUBJECTS_PATHS[id_sub]
                         this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
                                             _SERIALS[id_ser])
                         
@@ -243,12 +259,15 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        # meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                        #                          sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        meta_file = os.path.join(_SUBJECTS_PATHS[id_sub], sorted(os.listdir(_SUBJECTS_PATHS[id_sub]))[id_seq],"meta.yml")
+                        
                         with open(meta_file, 'r') as f:
                             meta = yaml.load(f, Loader=yaml.FullLoader)
                         num_frames = meta['num_frames']
-                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        # this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = _SUBJECTS_PATHS[id_sub]
                         this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
                                             _SERIALS[id_ser])
                         
@@ -276,12 +295,16 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        # meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                        #                          sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        meta_file = os.path.join(_SUBJECTS_PATHS[id_sub], sorted(os.listdir(_SUBJECTS_PATHS[id_sub]))[id_seq],"meta.yml")
+
                         with open(meta_file, 'r') as f:
                             meta = yaml.load(f, Loader=yaml.FullLoader)
                         num_frames = meta['num_frames']
-                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        # this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = _SUBJECTS_PATHS[id_sub]
+                        
                         this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
                                             _SERIALS[id_ser])
                         
@@ -307,12 +330,15 @@ class DexYCBDataset():
             for id_sub in subject_ind:
                 for id_ser in serial_ind:
                     for id_seq in sequence_ind:
-                        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        # meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+                        #                          sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+                        meta_file = os.path.join(_SUBJECTS_PATHS[id_sub], sorted(os.listdir(_SUBJECTS_PATHS[id_sub]))[id_seq],"meta.yml")
+
                         with open(meta_file, 'r') as f:
                             meta = yaml.load(f, Loader=yaml.FullLoader)
                         num_frames = meta['num_frames']
-                        this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        # this_data_path = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+                        this_data_path = _SUBJECTS_PATHS[id_sub]
                         this_data_path = os.path.join(this_data_path, sorted(os.listdir(this_data_path))[id_seq], 
                                             _SERIALS[id_ser])
                         
@@ -357,8 +383,10 @@ class DexYCBDataset():
         ])
 
     for id_sub, id_ser, id_seq, start_frame, seq_len in tqdm.tqdm(self._mapping, desc="Loading dataset"):
-        meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
-                                 sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+        # meta_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
+        #                          sorted(os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub])))[id_seq],"meta.yml")
+        meta_file = os.path.join(_SUBJECTS_PATHS[id_sub], sorted(os.listdir(_SUBJECTS_PATHS[id_sub]))[id_seq],"meta.yml")
+
         # pose_file = os.path.join(self._data_dir, _SUBJECTS[id_sub],
         #                          os.listdir(os.path.join(self._data_dir, _SUBJECTS[id_sub]))[id_seq], "pose.npz")
         with open(meta_file, 'r') as f:
@@ -394,7 +422,8 @@ class DexYCBDataset():
 
   def __getitem__(self, idx):
     id_sub, id_ser, id_seq, start_frame, seq_len = self._mapping[idx]
-    d = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+    # d = os.path.join(self._data_dir, _SUBJECTS[id_sub])
+    d = _SUBJECTS_PATHS[id_sub]
     d = os.path.join(d, sorted(os.listdir(d))[id_seq], 
                      _SERIALS[id_ser])
     sample = {
@@ -419,7 +448,7 @@ class DexYCBDataset():
 import h5py
 import multiprocessing as mp
 from manopth.manolayer import ManoLayer
-mano_model_folder = "/public/home/group_ucb/yunqili/code/hamer/_DATA/data/mano"
+mano_model_folder = "/data-share/share/handdata/mano/"
 
 @torch.no_grad()
 def pca_coeffs_to_axis45(coeffs_pca: torch.Tensor, layer: ManoLayer) -> torch.Tensor:
@@ -446,7 +475,7 @@ import json
 
 def write_videos(video_args):
     split,this_data_dir,start_frame,seq_len,video_name = video_args
-    video_path = os.path.join("/public/datasets/handdata/dexycb/videos_v4", split, video_name)
+    video_path = os.path.join("/data-share/share/handdata/preprocessed/dexycb/picked_videos", split, video_name)
     writer = iio.get_writer(video_path, fps=30,macro_block_size=None)
     for i in range(start_frame, start_frame + seq_len):
         img_path = os.path.join(this_data_dir, f"color_{i:06d}.jpg")
@@ -482,8 +511,10 @@ def _init_worker():
     )
 
 
-tmp_pkl_dir = "/public/datasets/handdata/tmp_dexycb"
+tmp_pkl_dir = "/data-share/share/handdata/preprocessed/dexycb/tmp_pkl_dir"
 os.makedirs(tmp_pkl_dir, exist_ok=True)
+
+
 def worker(arg):
     split, idx = arg
     pkl_dict = {}
@@ -600,6 +631,7 @@ def save_splits2hdf5(hdf5_path = ''):
 
     for split in ['test','train', 'val' ]:
         for idx in range(len(datasets[split])):
+        # for idx in range(10):
             todo_list.append((split,idx))
 
     with mp.Pool(processes=16, initializer=_init_worker, initargs=()) as pool:
@@ -612,15 +644,18 @@ def save_splits2hdf5(hdf5_path = ''):
         'val': {},
         'test': {}
     }
+    picked_videos_path = "/data-share/share/handdata/preprocessed/dexycb/picked_videos"
+    os.makedirs(picked_videos_path, exist_ok=True)
     with h5py.File(hdf5_path, 'w') as output_hdf5:
         for split, idx in tqdm.tqdm(todo_list, desc="Writing to HDF5"):
+            os.makedirs(os.path.join(picked_videos_path, split), exist_ok=True)
             group_name = f"{split}_{idx}"
             group = output_hdf5.create_group(group_name)
             pkl_path = os.path.join(tmp_pkl_dir, f"{group_name}.pkl")
             with open(pkl_path, 'rb') as pf:
                 pkl_dict = pickle.load(pf)
             dict_file_list[split][group_name] = len(pkl_dict['mano_poses'])
-            if not os.path.exists(os.path.join("/public/datasets/handdata/dexycb/videos_v4", split, pkl_dict['video_name'])):
+            if not os.path.exists(os.path.join("/data-share/share/handdata/preprocessed/dexycb/picked_videos", split, pkl_dict['video_name'])):
                 video_todo.append((split,datasets[split][idx]['data_dir'],datasets[split][idx]['start_frame'],datasets[split][idx]['seq_len'],pkl_dict['video_name']))
             for key in dtypes.keys():
                 data = pkl_dict[key]
@@ -761,7 +796,7 @@ def save_splits2hdf5(hdf5_path = ''):
 
 if __name__ == "__main__":
     save_splits2hdf5(
-        hdf5_path="/public/datasets/handdata/dexycb_v6.hdf5",
+        hdf5_path="/data-share/share/handdata/preprocessed/dexycb/dexycb.hdf5",
         # txt_path="/public/datasets/handdata/dexycb_v6.txt",
         # compression='gzip'
     )
