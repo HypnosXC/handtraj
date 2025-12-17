@@ -10,7 +10,10 @@ import torch.utils
 import torch.utils.data
 import os
 os.environ["PYOPENGL_PLATFORM"] = "egl"
+os.environ["PYGLET_HEADLESS"]="1"
 import json
+
+from scipy.spatial.transform import Rotation as R
 
 import imageio.v3 as iio
 from tqdm import tqdm
@@ -194,8 +197,15 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         subseq_len: int = 64,
         clip_stride: int = 64,
         min_len: int = 32,
+        speed_augment = None, # (0.9, 1.0)
+        flip_augment = False
     ) -> None:
+        self.augment = {
+            'speed': speed_augment,
+            'flip': flip_augment
+        }
         self.split = split
+
         if dataset_name=="dexycb":
             self._hdf5_path = "/data-share/share/handdata/preprocessed/dexycb/dexycb.hdf5"
             self.video_root = "/data-share/share/handdata/preprocessed/dexycb/picked_videos"
@@ -265,10 +275,6 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         kwargs: dict[str, Any] = {}
         group_name, start_idx, clip_len = self._mapping[index]
-        if self._subseq_len == -1:
-            pad_len = 0
-        else:
-            pad_len = self._subseq_len - clip_len
 
         with h5py.File(self._hdf5_path, "r") as f:
             dataset = f[group_name]
@@ -279,6 +285,61 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
             # if self.dataset_name=="arctic":
             #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
+            if dataset['mano_side'][()].decode('utf-8') == 'left':
+                kwargs["mano_side"] = torch.zeros(1)
+            else:
+                kwargs["mano_side"] = torch.ones(1)
+
+
+            if self.augment['speed'] is not None:
+                speed_aug = self.augment['speed']
+                # assert speed_aug is tuple
+                assert isinstance(speed_aug, tuple) and len(speed_aug) == 2, "speed_augment should be a tuple of (min_speed, max_speed)"
+                speed_factor = np.random.uniform(speed_aug[0], speed_aug[1])
+                ori_mano_pose = kwargs["mano_pose"].clone()
+                ori_len = ori_mano_pose.shape[0]
+                new_len = int(ori_len / speed_factor)
+                ori_mano_trans = ori_mano_pose[:,48:51]
+                mano_rots = ori_mano_pose[:,:48].reshape(-1,3)
+                mano_quat = R.from_rotvec(mano_rots.numpy()).as_quat()
+                ori_mano_quat = mano_quat.reshape(ori_len, -1,4)
+
+                # linear interpolate on ori_mano_quat and ori_mano_trans
+                new_indices = np.linspace(0, ori_len - 1, new_len)
+                new_mano_quat = np.zeros((new_len, ori_mano_quat.shape[1],4),dtype=np.float32)
+                new_mano_trans = np.zeros((new_len, ori_mano_trans.shape[1]),dtype=np.float32)
+
+                for t in range(1, ori_len):
+                    dots = np.sum(ori_mano_quat[t] * ori_mano_quat[t-1], axis=-1)
+                    neg_indices = dots < 0
+                    
+                    if np.any(neg_indices):
+                        ori_mano_quat[t, neg_indices] *= -1.0
+
+                for i in range(ori_mano_quat.shape[1]):
+                    for j in range(4):
+                        new_mano_quat[:,i,j] = np.interp(new_indices, np.arange(ori_len), ori_mano_quat[:,i,j])
+                norm = np.linalg.norm(new_mano_quat, axis=-1, keepdims=True)
+                new_mano_quat = new_mano_quat / norm
+                # Convert back to rotation vectors
+                new_mano_rots = R.from_quat(new_mano_quat.reshape(-1,4)).as_rotvec().astype(np.float32)
+                new_mano_rots = new_mano_rots.reshape(new_len, -1)
+                for i in range(new_mano_trans.shape[1]):
+                    new_mano_trans[:,i] = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy()[:,i])
+                # new_mano_trans = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy())
+                if self._subseq_len != -1:
+                    kwargs["mano_pose"] = torch.cat([torch.from_numpy(new_mano_rots), torch.from_numpy(new_mano_trans)], dim=1)[:min(new_len, self._subseq_len), :]
+
+                _,new_3d_joint = self.get_vertices_joints_from_mano(kwargs["mano_pose"], kwargs["mano_betas"], is_right=(kwargs["mano_side"].item()==1))
+                kwargs["mano_joint_3d"] = new_3d_joint
+
+                clip_len = kwargs["mano_pose"].shape[0]
+
+            if self._subseq_len == -1:
+                pad_len = 0
+            else:
+                pad_len = self._subseq_len - clip_len
+
             kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][:])
             if len(kwargs["intrinsics"].shape) == 1:
                 if self._subseq_len !=-1: 
@@ -289,10 +350,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
                 if self._subseq_len != -1: 
                     kwargs["intrinsics"] = torch.cat([kwargs["intrinsics"], torch.zeros((pad_len, kwargs["intrinsics"].shape[1]))], dim=0)
-            if dataset['mano_side'][()].decode('utf-8') == 'left':
-                kwargs["mano_side"] = torch.zeros(1)
-            else:
-                kwargs["mano_side"] = torch.ones(1)
+            
+            
             # kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
             kwargs["mask"] = torch.ones((clip_len), dtype=torch.bool)
             # pad if needed
@@ -321,10 +380,12 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                         frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
                         frame_resized = cv2.resize(frame, resize)
                         resized_frames.append(torch.from_numpy(frame_resized))
+
                     intrinsics[:, 0] = intrinsics[:, 0] * resize[0] / kwargs["rgb_frames"].shape[2]
                     intrinsics[:, 1] = intrinsics[:, 1] * resize[1] / kwargs["rgb_frames"].shape[1]
                     intrinsics[:, 2] = intrinsics[:, 2] * resize[0] / kwargs["rgb_frames"].shape[2]
                     intrinsics[:, 3] = intrinsics[:, 3] * resize[1] / kwargs["rgb_frames"].shape[1]
+
                     kwargs["intrinsics"] = intrinsics
                     kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
             else:
@@ -340,6 +401,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         #     kwargs['img_feature'] = img_features
         # else:
         #     kwargs['img_feature'] = img_features[start_idx:start_idx+clip_len]
+
+
         kwargs['img_feature'] = torch.zeros((1,768))  # dummy feature
         return HandTrainingData(**kwargs)
     
@@ -358,7 +421,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         out = cv2.VideoWriter(out_dir+"/gt_joints.mp4", fourcc, 10, (sample.rgb_frames.shape[2]*2, sample.rgb_frames.shape[1]))
 
         if from_mano:
-            _, mano_joint_3d = self.get_vertices_joints(index)
+            _, mano_joint_3d = self.get_vertices_joints_from_index(index)
             mpjpe_frames = torch.norm(mano_joint_3d - sample.mano_joint_3d, dim=-1)
             print("MPJPE per frame (m): ", mpjpe_frames.mean(dim=-1))
             print("all mean: ", mpjpe_frames.mean().item())
@@ -388,7 +451,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 
     def visualize_manos_in_rgb(self, index: int,out_dir:str = "tmp",resize=None) -> None:
         os.makedirs(out_dir, exist_ok=True)
-        mano_vertices, _ = self.get_vertices_joints(index)
+        mano_vertices, _ = self.get_vertices_joints_from_index(index)
         vertices = mano_vertices  # (T, 778, 3)
         sample = self.__getitem__(index, resize=resize)
         
@@ -420,29 +483,45 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             out.write(composited)
         out.release()
 
-    def get_vertices_joints(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        sample = self.__getitem__(index)
-        if sample.mano_side.item() == 0:
+    def get_vertices_joints_from_mano(self, mano_pose: torch.Tensor, mano_betas: torch.Tensor, is_right: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        if not is_right:
             vertices, joints = self.left_mano_layer(
-                sample.mano_pose[:,:48],
-                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-                sample.mano_pose[:,48:51]
+                mano_pose[:,:48],
+                mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1),
+                mano_pose[:,48:51]
             )
-        elif sample.mano_side.item() == 1:
+        elif is_right:
             vertices, joints = self.right_mano_layer(
-                sample.mano_pose[:,:48],
-                sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
-                sample.mano_pose[:,48:51]
+                mano_pose[:,:48],
+                mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1),
+                mano_pose[:,48:51]
             )
-        else:
-            print("Error: mano_side should be 0 or 1")
-            return None
         vertices = vertices/ 1000  # Convert to meters
         joints = joints / 1000  # Convert to meters
-        # print((joints - sample.mano_joint_3d)[0])
-        
         return vertices, joints
     
+    def get_vertices_joints_from_index(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        sample = self.__getitem__(index)
+        # if sample.mano_side.item() == 0:
+        #     vertices, joints = self.left_mano_layer(
+        #         sample.mano_pose[:,:48],
+        #         sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
+        #         sample.mano_pose[:,48:51]
+        #     )
+        # elif sample.mano_side.item() == 1:
+        #     vertices, joints = self.right_mano_layer(
+        #         sample.mano_pose[:,:48],
+        #         sample.mano_betas.unsqueeze(0).repeat(sample.mano_pose.shape[0], 1),
+        #         sample.mano_pose[:,48:51]
+        #     )
+        # else:
+        #     print("Error: mano_side should be 0 or 1")
+        #     return None
+        # vertices = vertices/ 1000  # Convert to meters
+        # joints = joints / 1000  # Convert to meters
+        # print((joints - sample.mano_joint_3d)[0])
+        return self.get_vertices_joints_from_mano(sample.mano_pose, sample.mano_betas, is_right=(sample.mano_side.item()==1))
+
     def get_mano_faces(self,mano_side='left'):
         if mano_side=='right':
             return self.right_mano_layer.th_faces
@@ -565,18 +644,25 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
         clip_stride: Stride between subsequences.
         min_len: Minimum length of subsequences to include.
     """
-    def __init__(self,split: Literal["train", "val", "test"] = "train", dataset_name: Literal["all","dexycb", "arctic", "interhand26m", "ho3d"] = 'all', vis=False, subseq_len: int = 64, clip_stride: int = 8,min_len:int=32) -> None:
+    def __init__(self,split: Literal["train", "val", "test"] = "train",
+                 dataset_name: Literal["all","dexycb", "arctic", "interhand26m", "ho3d"] = 'all',
+                 vis=False, subseq_len: int = 64,
+                 clip_stride: int = 16,
+                 min_len:int=32,
+                 speed_augment = None,
+                 flip_augment = False,
+                 ) -> None:
         if dataset_name == "all":
-            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
-            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
-            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
+            dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment)
+            dataset_dexycb = HandHdf5EachDataset(split=split, dataset_name="dexycb", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment)
+            dataset_arctic = HandHdf5EachDataset(split=split, dataset_name="arctic", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment)
             if split == "train" or split == "test":
-                dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)
+                dataset_ho3d = HandHdf5EachDataset(split=split, dataset_name="ho3d", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment)
                 self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic, dataset_ho3d])
             else:
                 self.dataset = ConcatDataset([dataset_ih26, dataset_dexycb, dataset_arctic])
         else:
-            self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len)])
+            self.dataset = ConcatDataset([HandHdf5EachDataset(split=split, dataset_name=dataset_name, vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment)])
         
 
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
@@ -589,12 +675,14 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def get_vertices_joints(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_vertices_joints_from_index(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         for ds in self.dataset.datasets:
             if index < len(ds):
-                return ds.get_vertices_joints(index)
+                return ds.get_vertices_joints_from_index(index)
             else:
                 index -= len(ds)
+
+
     def get_mano_faces(self,mano_side='left'):
         for ds in self.dataset.datasets:
             return ds.get_mano_faces(mano_side=mano_side)
@@ -634,25 +722,25 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     
 if __name__ == "__main__":    
 
-    # dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=-1, clip_stride=4, min_len=32)
-    # dataset.visualize_joints_in_rgb(7, out_dir="arctic_joints", resize=None)
-    # dataset.visualize_manos_in_rgb(7, out_dir="arctic_manos", resize=(512,512))
+    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=None)
+    dataset.visualize_joints_in_rgb(7, out_dir="arctic_joints", resize=None)
+    dataset.visualize_manos_in_rgb(7, out_dir="arctic_manos", resize=(512,512))
 
     # for split in ['train','test']:
     #     dataset = HandHdf5Dataset(split=split, dataset_name='ho3d', vis=False, subseq_len=64, clip_stride=64, min_len=32)
     #     for i in tqdm(range(len(dataset))):
     #         sample = dataset.__getitem__(i, resize=None)
 
-    for split in ['train','val','test']:
+    # for split in ['train','val','test']:
         # dataset = HandHdf5Dataset(split=split, dataset_name='dexycb', vis=False, subseq_len=64, clip_stride=64, min_len=32)
         # for i in tqdm(range(len(dataset)), desc=f"Processing dexycb {split}"):
         #     sample = dataset.__getitem__(i, resize=None)
         # dataset = HandHdf5Dataset(split=split, dataset_name='interhand26m', vis=False, subseq_len=64, clip_stride=64, min_len=32)
         # for i in tqdm(range(len(dataset)), desc=f"Processing interhand26m {split}"):
         #     sample = dataset.__getitem__(i, resize=None)
-        dataset = HandHdf5Dataset(split=split, dataset_name='arctic', vis=False, subseq_len=-1)
-        for i in tqdm(range(len(dataset)), desc=f"Processing arctic {split}"):
-            sample = dataset.__getitem__(i, resize=None)
+        # dataset = HandHdf5Dataset(split=split, dataset_name='arctic', vis=False, subseq_len=-1)
+        # for i in tqdm(range(len(dataset)), desc=f"Processing arctic {split}"):
+        #     sample = dataset.__getitem__(i, resize=None)
 
     # # dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
     # dataset.visualize_joints_in_rgb(4, out_dir="ho3d_test_joints", resize=(512,512))
