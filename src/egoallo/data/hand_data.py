@@ -14,6 +14,7 @@ os.environ["PYGLET_HEADLESS"]="1"
 import json
 
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 import imageio.v3 as iio
 from tqdm import tqdm
@@ -304,7 +305,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 mano_quat = R.from_rotvec(mano_rots.numpy()).as_quat()
                 ori_mano_quat = mano_quat.reshape(ori_len, -1,4)
 
-                # linear interpolate on ori_mano_quat and ori_mano_trans
+                # linear interpolate on ori_mano_trans
                 new_indices = np.linspace(0, ori_len - 1, new_len)
                 new_mano_quat = np.zeros((new_len, ori_mano_quat.shape[1],4),dtype=np.float32)
                 new_mano_trans = np.zeros((new_len, ori_mano_trans.shape[1]),dtype=np.float32)
@@ -316,9 +317,19 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     if np.any(neg_indices):
                         ori_mano_quat[t, neg_indices] *= -1.0
 
+                # slerp interpolation on ori_mano_quat
                 for i in range(ori_mano_quat.shape[1]):
-                    for j in range(4):
-                        new_mano_quat[:,i,j] = np.interp(new_indices, np.arange(ori_len), ori_mano_quat[:,i,j])
+                    key_rots = R.from_quat(ori_mano_quat[:,i,:])
+                    slerp = Slerp(np.arange(ori_len), key_rots)
+                    interp_rots = slerp(new_indices)
+                    new_mano_quat[:,i,:] = interp_rots.as_quat()
+
+
+                # for i in range(ori_mano_quat.shape[1]):
+                    # for j in range(4):
+                    #     new_mano_quat[:,i,j] = np.interp(new_indices, np.arange(ori_len), ori_mano_quat[:,i,j])
+                
+
                 norm = np.linalg.norm(new_mano_quat, axis=-1, keepdims=True)
                 new_mano_quat = new_mano_quat / norm
                 # Convert back to rotation vectors
@@ -722,7 +733,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     
 if __name__ == "__main__":    
 
-    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=None)
+    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=(0.5,0.8))
     dataset.visualize_joints_in_rgb(7, out_dir="arctic_joints", resize=None)
     dataset.visualize_manos_in_rgb(7, out_dir="arctic_manos", resize=(512,512))
 
