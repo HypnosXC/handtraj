@@ -75,14 +75,14 @@ class HandDenoiseTraj(TensorDataclass):
                             use_pca = False,
                             ncomps=45,
                             side="left",
-                            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+                            mano_root='/data-share/share-folder/handdata/mano',
                         ).to(self.mano_poses.device)
         right_mano_layer = ManoLayer(
                             flat_hand_mean=True,
                             use_pca = False,
                             ncomps=45,
                             side="right",
-                            mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
+                            mano_root='/data-share/share-folder/handdata/mano',
                         ).to(self.mano_poses.device)
         vertices=[]
         joints=[]

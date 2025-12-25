@@ -201,6 +201,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         speed_augment = None, # (0.9, 1.0)
         flip_augment = False
     ) -> None:
+        if speed_augment is not None:
+            assert isinstance(speed_augment, tuple) and len(speed_augment) == 2, "speed_augment should be a tuple of (min_speed, max_speed)"
         self.augment = {
             'speed': speed_augment,
             'flip': flip_augment
@@ -208,20 +210,20 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self.split = split
 
         if dataset_name=="dexycb":
-            self._hdf5_path = "/data-share/share/handdata/preprocessed/dexycb/dexycb.hdf5"
-            self.video_root = "/data-share/share/handdata/preprocessed/dexycb/picked_videos"
+            self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/dexycb/dexycb.hdf5"
+            self.video_root = "/data-share/share-folder/handdata/preprocessed/dexycb/picked_videos"
         elif dataset_name=="interhand26m":
-            self._hdf5_path = "/data-share/share/handdata/preprocessed/interhand26m/interhand26m.hdf5"
-            self.video_root = "/data-share/share/handdata/preprocessed/interhand26m/picked_videos"
+            self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/interhand26m/interhand26m.hdf5"
+            self.video_root = "/data-share/share-folder/handdata/preprocessed/interhand26m/picked_videos"
         elif dataset_name=="arctic":
-            self._hdf5_path = "/data-share/share/handdata/preprocessed/arctic/arctic.hdf5"
-            self.video_root = "/data-share/share/handdata/preprocessed/arctic/picked_videos"
+            self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/arctic/arctic.hdf5"
+            self.video_root = "/data-share/share-folder/handdata/preprocessed/arctic/picked_videos"
         elif dataset_name == "ho3d":
-            self.video_root = "/data-share/share/handdata/preprocessed/ho3d/picked_videos"
+            self.video_root = "/data-share/share-folder/handdata/preprocessed/ho3d/picked_videos"
             if split == "train":
-                self._hdf5_path = "/data-share/share/handdata/preprocessed/ho3d/ho3d_train.hdf5"
+                self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/ho3d/ho3d_train.hdf5"
             elif split == "test":
-                self._hdf5_path = "/data-share/share/handdata/preprocessed/ho3d/ho3d_evaluation.hdf5"
+                self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/ho3d/ho3d_evaluation.hdf5"
                 self.split = "evaluation"
             else:
                 raise ValueError("For ho3d, split should be train or test")
@@ -252,7 +254,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 else:
                     start_idx = 0
                     while start_idx + self._subseq_len < group_length:
-                        self._mapping.append((group_name, start_idx, self._subseq_len))
+                        self._mapping.append((group_name, start_idx, group_length - start_idx))
                         start_idx += self._clip_stride
                     # last clip
                     self._mapping.append((group_name, group_length - self._subseq_len, self._subseq_len))
@@ -263,19 +265,29 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             flat_hand_mean=True,
             ncomps=45,
             side='left',
-            mano_root="/data-share/share/handdata/mano",
+            mano_root="/data-share/share-folder/handdata/mano",
         )
         self.right_mano_layer = ManoLayer(
             use_pca=False,
             flat_hand_mean=True,
             ncomps=45,
             side='right',
-            mano_root="/data-share/share/handdata/mano",
+            mano_root="/data-share/share-folder/handdata/mano",
         )
         
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         kwargs: dict[str, Any] = {}
-        group_name, start_idx, clip_len = self._mapping[index]
+        # group_name, start_idx, clip_len = self._mapping[index]
+        group_name, start_idx, after_len = self._mapping[index]
+        if self.augment['speed'] is not None:
+            speed_aug = self.augment['speed']
+            speed_factor = np.random.uniform(speed_aug[0], speed_aug[1])
+        else:
+            speed_factor = 1.0
+        if self._subseq_len == -1:
+            clip_len = after_len
+        else:
+            clip_len = min(int(self._subseq_len * speed_factor), after_len)
 
         with h5py.File(self._hdf5_path, "r") as f:
             dataset = f[group_name]
@@ -291,12 +303,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             else:
                 kwargs["mano_side"] = torch.ones(1)
 
-
             if self.augment['speed'] is not None:
-                speed_aug = self.augment['speed']
-                # assert speed_aug is tuple
-                assert isinstance(speed_aug, tuple) and len(speed_aug) == 2, "speed_augment should be a tuple of (min_speed, max_speed)"
-                speed_factor = np.random.uniform(speed_aug[0], speed_aug[1])
                 ori_mano_pose = kwargs["mano_pose"].clone()
                 ori_len = ori_mano_pose.shape[0]
                 new_len = int(ori_len / speed_factor)
@@ -734,8 +741,8 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
 if __name__ == "__main__":    
 
     dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=(0.5,0.8))
-    dataset.visualize_joints_in_rgb(7, out_dir="arctic_joints", resize=None)
-    dataset.visualize_manos_in_rgb(7, out_dir="arctic_manos", resize=(512,512))
+    dataset.visualize_joints_in_rgb(7, out_dir="arctic_results", resize=None)
+    dataset.visualize_manos_in_rgb(7, out_dir="arctic_results", resize=(512,512))
 
     # for split in ['train','test']:
     #     dataset = HandHdf5Dataset(split=split, dataset_name='ho3d', vis=False, subseq_len=64, clip_stride=64, min_len=32)
@@ -753,27 +760,27 @@ if __name__ == "__main__":
         # for i in tqdm(range(len(dataset)), desc=f"Processing arctic {split}"):
         #     sample = dataset.__getitem__(i, resize=None)
 
+    dataset = HandHdf5Dataset(split='test', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
     # # dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
-    # dataset.visualize_joints_in_rgb(4, out_dir="ho3d_test_joints", resize=(512,512))
-    # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_test_mano", resize=(512,512))
+    dataset.visualize_joints_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
+    dataset.visualize_manos_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
     # # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_gt", resize=(512,512), debug=True)
 
-    # dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
-    # print("Dataset length: ", len(dataset))
-    # dataset.visualize_joints_in_rgb(10, out_dir="ho3d_train_joints", resize=(512,512))
-    # dataset.visualize_manos_in_rgb(10, out_dir="ho3d_train_mano", resize=(512,512))
+    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
+    dataset.visualize_joints_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
+    dataset.visualize_manos_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
 
 
-    # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
+    dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
 
-    # dataset.visualize_joints_in_rgb(10, out_dir="interhand26m_joints", resize=None)
-    # dataset.visualize_manos_in_rgb(10, out_dir="interhand26m_manos", resize=None)
+    dataset.visualize_joints_in_rgb(10, out_dir="interhand26m_results", resize=None)
+    dataset.visualize_manos_in_rgb(10, out_dir="interhand26m_results", resize=None)
 
 
 
-    # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
-    # dataset.visualize_joints_in_rgb(10, out_dir="dexycb_joints", resize=None)
-    # dataset.visualize_manos_in_rgb(10, out_dir="dexycb_manos", resize=None)
+    dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
+    dataset.visualize_joints_in_rgb(10, out_dir="dexycb_results", resize=None)
+    dataset.visualize_manos_in_rgb(10, out_dir="dexycb_results", resize=None)
 
     # less =0
     # more =0
