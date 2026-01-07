@@ -274,8 +274,11 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             side='right',
             mano_root="/data-share/share-folder/handdata/mano",
         )
+        self.archive: h5py.File | None = None
         
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
+        if self.archive is None:
+            self.archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         kwargs: dict[str, Any] = {}
         # group_name, start_idx, clip_len = self._mapping[index]
         group_name, start_idx, after_len = self._mapping[index]
@@ -289,128 +292,128 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             clip_len = min(int(self._subseq_len * speed_factor), after_len)
 
-        with h5py.File(self._hdf5_path, "r") as f:
-            dataset = f[group_name]
-            kwargs["mano_betas"] = torch.from_numpy(dataset['mano_betas'][:])
-            kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][start_idx:start_idx+clip_len,0])
-            kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][:])
-                
-            kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
-            # if self.dataset_name=="arctic":
-            #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
-            if dataset['mano_side'][()].decode('utf-8') == 'left':
-                kwargs["mano_side"] = torch.zeros(1)
-            else:
-                kwargs["mano_side"] = torch.ones(1)
 
-            if self.augment['speed'] is not None:
-                ori_mano_pose = kwargs["mano_pose"].clone()
-                ori_len = ori_mano_pose.shape[0]
-                new_len = int(ori_len / speed_factor)
-                ori_mano_trans = ori_mano_pose[:,48:51]
-                mano_rots = ori_mano_pose[:,:48].reshape(-1,3)
-                mano_quat = R.from_rotvec(mano_rots.numpy()).as_quat()
-                ori_mano_quat = mano_quat.reshape(ori_len, -1,4)
-
-                # linear interpolate on ori_mano_trans
-                new_indices = np.linspace(0, ori_len - 1, new_len)
-                new_mano_quat = np.zeros((new_len, ori_mano_quat.shape[1],4),dtype=np.float32)
-                new_mano_trans = np.zeros((new_len, ori_mano_trans.shape[1]),dtype=np.float32)
-
-                for t in range(1, ori_len):
-                    dots = np.sum(ori_mano_quat[t] * ori_mano_quat[t-1], axis=-1)
-                    neg_indices = dots < 0
-                    
-                    if np.any(neg_indices):
-                        ori_mano_quat[t, neg_indices] *= -1.0
-
-                # slerp interpolation on ori_mano_quat
-                for i in range(ori_mano_quat.shape[1]):
-                    key_rots = R.from_quat(ori_mano_quat[:,i,:])
-                    slerp = Slerp(np.arange(ori_len), key_rots)
-                    interp_rots = slerp(new_indices)
-                    new_mano_quat[:,i,:] = interp_rots.as_quat()
-
-
-                # for i in range(ori_mano_quat.shape[1]):
-                    # for j in range(4):
-                    #     new_mano_quat[:,i,j] = np.interp(new_indices, np.arange(ori_len), ori_mano_quat[:,i,j])
-                
-
-                norm = np.linalg.norm(new_mano_quat, axis=-1, keepdims=True)
-                new_mano_quat = new_mano_quat / norm
-                # Convert back to rotation vectors
-                new_mano_rots = R.from_quat(new_mano_quat.reshape(-1,4)).as_rotvec().astype(np.float32)
-                new_mano_rots = new_mano_rots.reshape(new_len, -1)
-                for i in range(new_mano_trans.shape[1]):
-                    new_mano_trans[:,i] = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy()[:,i])
-                # new_mano_trans = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy())
-                if self._subseq_len != -1:
-                    kwargs["mano_pose"] = torch.cat([torch.from_numpy(new_mano_rots), torch.from_numpy(new_mano_trans)], dim=1)[:min(new_len, self._subseq_len), :]
-
-                _,new_3d_joint = self.get_vertices_joints_from_mano(kwargs["mano_pose"], kwargs["mano_betas"], is_right=(kwargs["mano_side"].item()==1))
-                kwargs["mano_joint_3d"] = new_3d_joint
-
-                clip_len = kwargs["mano_pose"].shape[0]
-
-            if self._subseq_len == -1:
-                pad_len = 0
-            else:
-                pad_len = self._subseq_len - clip_len
-
-            kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][:])
-            if len(kwargs["intrinsics"].shape) == 1:
-                if self._subseq_len !=-1: 
-                    kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(self._subseq_len, -1)
-                else:
-                    kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(clip_len, -1)
-            else:
-                kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
-                if self._subseq_len != -1: 
-                    kwargs["intrinsics"] = torch.cat([kwargs["intrinsics"], torch.zeros((pad_len, kwargs["intrinsics"].shape[1]))], dim=0)
+        dataset = self.archive[group_name]
+        kwargs["mano_betas"] = torch.from_numpy(dataset['mano_betas'][:])
+        kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][start_idx:start_idx+clip_len,0])
+        kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][:])
             
+        kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
+        # if self.dataset_name=="arctic":
+        #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
+        if dataset['mano_side'][()].decode('utf-8') == 'left':
+            kwargs["mano_side"] = torch.zeros(1)
+        else:
+            kwargs["mano_side"] = torch.ones(1)
+
+        if self.augment['speed'] is not None:
+            ori_mano_pose = kwargs["mano_pose"].clone()
+            ori_len = ori_mano_pose.shape[0]
+            new_len = int(ori_len / speed_factor)
+            ori_mano_trans = ori_mano_pose[:,48:51]
+            mano_rots = ori_mano_pose[:,:48].reshape(-1,3)
+            mano_quat = R.from_rotvec(mano_rots.numpy()).as_quat()
+            ori_mano_quat = mano_quat.reshape(ori_len, -1,4)
+
+            # linear interpolate on ori_mano_trans
+            new_indices = np.linspace(0, ori_len - 1, new_len)
+            new_mano_quat = np.zeros((new_len, ori_mano_quat.shape[1],4),dtype=np.float32)
+            new_mano_trans = np.zeros((new_len, ori_mano_trans.shape[1]),dtype=np.float32)
+
+            for t in range(1, ori_len):
+                dots = np.sum(ori_mano_quat[t] * ori_mano_quat[t-1], axis=-1)
+                neg_indices = dots < 0
+                
+                if np.any(neg_indices):
+                    ori_mano_quat[t, neg_indices] *= -1.0
+
+            # slerp interpolation on ori_mano_quat
+            for i in range(ori_mano_quat.shape[1]):
+                key_rots = R.from_quat(ori_mano_quat[:,i,:])
+                slerp = Slerp(np.arange(ori_len), key_rots)
+                interp_rots = slerp(new_indices)
+                new_mano_quat[:,i,:] = interp_rots.as_quat()
+
+
+            # for i in range(ori_mano_quat.shape[1]):
+                # for j in range(4):
+                #     new_mano_quat[:,i,j] = np.interp(new_indices, np.arange(ori_len), ori_mano_quat[:,i,j])
             
-            # kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
-            kwargs["mask"] = torch.ones((clip_len), dtype=torch.bool)
-            # pad if needed
+
+            norm = np.linalg.norm(new_mano_quat, axis=-1, keepdims=True)
+            new_mano_quat = new_mano_quat / norm
+            # Convert back to rotation vectors
+            new_mano_rots = R.from_quat(new_mano_quat.reshape(-1,4)).as_rotvec().astype(np.float32)
+            new_mano_rots = new_mano_rots.reshape(new_len, -1)
+            for i in range(new_mano_trans.shape[1]):
+                new_mano_trans[:,i] = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy()[:,i])
+            # new_mano_trans = np.interp(new_indices, np.arange(ori_len), ori_mano_trans.numpy())
+            if self._subseq_len != -1:
+                kwargs["mano_pose"] = torch.cat([torch.from_numpy(new_mano_rots), torch.from_numpy(new_mano_trans)], dim=1)[:min(new_len, self._subseq_len), :]
+
+            _,new_3d_joint = self.get_vertices_joints_from_mano(kwargs["mano_pose"], kwargs["mano_betas"], is_right=(kwargs["mano_side"].item()==1))
+            kwargs["mano_joint_3d"] = new_3d_joint
+
+            clip_len = kwargs["mano_pose"].shape[0]
+
+        if self._subseq_len == -1:
+            pad_len = 0
+        else:
+            pad_len = self._subseq_len - clip_len
+
+        kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][:])
+        if len(kwargs["intrinsics"].shape) == 1:
+            if self._subseq_len !=-1: 
+                kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(self._subseq_len, -1)
+            else:
+                kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(clip_len, -1)
+        else:
+            kwargs["intrinsics"] = kwargs["intrinsics"][start_idx:start_idx+clip_len]
+            if self._subseq_len != -1: 
+                kwargs["intrinsics"] = torch.cat([kwargs["intrinsics"], torch.zeros((pad_len, kwargs["intrinsics"].shape[1]))], dim=0)
+        
+        
+        # kwargs["mask"] = torch.from_numpy(dataset['mask'][index]).type(torch.bool)
+        kwargs["mask"] = torch.ones((clip_len), dtype=torch.bool)
+        # pad if needed
+        if pad_len > 0:
+            kwargs["mano_pose"] = torch.cat([kwargs["mano_pose"], torch.zeros((pad_len, *kwargs["mano_pose"].shape[1:]))], dim=0)
+            kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
+            kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
+        video_name = dataset['video_name'][()].decode('utf-8')
+        if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
+            print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
+        if self.vis:
+            video_path = os.path.join(self.video_root, self.split, video_name)
+            reader = iio.imread(video_path)
+            rgb_frames = []
+            for i in range(start_idx, start_idx + clip_len):
+                frame = reader[i]
+                rgb_frames.append(torch.from_numpy(frame))
             if pad_len > 0:
-                kwargs["mano_pose"] = torch.cat([kwargs["mano_pose"], torch.zeros((pad_len, *kwargs["mano_pose"].shape[1:]))], dim=0)
-                kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
-                kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
-            video_name = dataset['video_name'][()].decode('utf-8')
-            if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
-                print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
-            if self.vis:
-                video_path = os.path.join(self.video_root, self.split, video_name)
-                reader = iio.imread(video_path)
-                rgb_frames = []
-                for i in range(start_idx, start_idx + clip_len):
-                    frame = reader[i]
-                    rgb_frames.append(torch.from_numpy(frame))
-                if pad_len > 0:
-                    rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * pad_len)
-                kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
-                # resize
-                if resize is not None:
-                    resized_frames = []
-                    intrinsics = kwargs["intrinsics"].clone()
-                    for i in range(kwargs["rgb_frames"].shape[0]):
-                        frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
-                        frame_resized = cv2.resize(frame, resize)
-                        resized_frames.append(torch.from_numpy(frame_resized))
+                rgb_frames.extend([torch.zeros_like(rgb_frames[0])] * pad_len)
+            kwargs["rgb_frames"] = torch.stack(rgb_frames, dim=0)
+            # resize
+            if resize is not None:
+                resized_frames = []
+                intrinsics = kwargs["intrinsics"].clone()
+                for i in range(kwargs["rgb_frames"].shape[0]):
+                    frame = kwargs["rgb_frames"][i].numpy().astype(np.uint8)
+                    frame_resized = cv2.resize(frame, resize)
+                    resized_frames.append(torch.from_numpy(frame_resized))
 
-                    intrinsics[:, 0] = intrinsics[:, 0] * resize[0] / kwargs["rgb_frames"].shape[2]
-                    intrinsics[:, 1] = intrinsics[:, 1] * resize[1] / kwargs["rgb_frames"].shape[1]
-                    intrinsics[:, 2] = intrinsics[:, 2] * resize[0] / kwargs["rgb_frames"].shape[2]
-                    intrinsics[:, 3] = intrinsics[:, 3] * resize[1] / kwargs["rgb_frames"].shape[1]
+                intrinsics[:, 0] = intrinsics[:, 0] * resize[0] / kwargs["rgb_frames"].shape[2]
+                intrinsics[:, 1] = intrinsics[:, 1] * resize[1] / kwargs["rgb_frames"].shape[1]
+                intrinsics[:, 2] = intrinsics[:, 2] * resize[0] / kwargs["rgb_frames"].shape[2]
+                intrinsics[:, 3] = intrinsics[:, 3] * resize[1] / kwargs["rgb_frames"].shape[1]
 
-                    kwargs["intrinsics"] = intrinsics
-                    kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
+                kwargs["intrinsics"] = intrinsics
+                kwargs["rgb_frames"] = torch.stack(resized_frames, dim=0)
+        else:
+            if self._subseq_len == -1:
+                kwargs["rgb_frames"] = torch.ones((clip_len), dtype=torch.uint8)
             else:
-                if self._subseq_len == -1:
-                    kwargs["rgb_frames"] = torch.ones((clip_len), dtype=torch.uint8)
-                else:
-                    kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
+                kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
         # load img features
         # img_feat_path = os.path.join(self.img_feat_root, f'imgfeat_{group_name}.pt')
         # assert os.path.exists(img_feat_path), f"Image feature file not found: {img_feat_path}"
@@ -739,10 +742,16 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
+    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=False,subseq_len=64, clip_stride=64, min_len=32, speed_augment=None)
+    # dataset = HandHdf5Dataset(split='train', dataset_name='all', vis=False,subseq_len=64, clip_stride=64, min_len=32, speed_augment=None)
+    print("Total samples in all dataset:", len(dataset))
+    for i in tqdm(range(len(dataset))):
+        sample = dataset.__getitem__(i, resize=None)
+    
 
-    dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=(0.5,0.8))
-    dataset.visualize_joints_in_rgb(7, out_dir="arctic_results", resize=None)
-    dataset.visualize_manos_in_rgb(7, out_dir="arctic_results", resize=(512,512))
+    # dataset = HandHdf5Dataset(split='test', dataset_name='arctic', vis=True,subseq_len=64, clip_stride=4, min_len=32, speed_augment=(0.5,0.8))
+    # dataset.visualize_joints_in_rgb(7, out_dir="arctic_results", resize=None)
+    # dataset.visualize_manos_in_rgb(7, out_dir="arctic_results", resize=(512,512))
 
     # for split in ['train','test']:
     #     dataset = HandHdf5Dataset(split=split, dataset_name='ho3d', vis=False, subseq_len=64, clip_stride=64, min_len=32)
@@ -760,27 +769,27 @@ if __name__ == "__main__":
         # for i in tqdm(range(len(dataset)), desc=f"Processing arctic {split}"):
         #     sample = dataset.__getitem__(i, resize=None)
 
-    dataset = HandHdf5Dataset(split='test', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
-    # # dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
-    dataset.visualize_joints_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
-    dataset.visualize_manos_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
-    # # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_gt", resize=(512,512), debug=True)
+    # dataset = HandHdf5Dataset(split='test', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=4, min_len=32)
+    # # # dataset.visualize_joints_in_rgb(40, out_dir="ho3d_from_mano", resize=None, from_mano=True)
+    # dataset.visualize_joints_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
+    # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_test_results", resize=(512,512))
+    # # # dataset.visualize_manos_in_rgb(4, out_dir="ho3d_gt", resize=(512,512), debug=True)
 
-    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
-    dataset.visualize_joints_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
-    dataset.visualize_manos_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
-
-
-    dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
-
-    dataset.visualize_joints_in_rgb(10, out_dir="interhand26m_results", resize=None)
-    dataset.visualize_manos_in_rgb(10, out_dir="interhand26m_results", resize=None)
+    # dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=True, subseq_len=64, clip_stride=64, min_len=32)
+    # dataset.visualize_joints_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
+    # dataset.visualize_manos_in_rgb(10, out_dir="ho3d_train_results", resize=(512,512))
 
 
+    # dataset = HandHdf5Dataset(split='test', dataset_name='interhand26m', vis=True, subseq_len=64, clip_stride=4, min_len=32)
 
-    dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
-    dataset.visualize_joints_in_rgb(10, out_dir="dexycb_results", resize=None)
-    dataset.visualize_manos_in_rgb(10, out_dir="dexycb_results", resize=None)
+    # dataset.visualize_joints_in_rgb(10, out_dir="interhand26m_results", resize=None)
+    # dataset.visualize_manos_in_rgb(10, out_dir="interhand26m_results", resize=None)
+
+
+
+    # dataset = HandHdf5Dataset(split='train', dataset_name='dexycb', vis=True, subseq_len=64, clip_stride=4)
+    # dataset.visualize_joints_in_rgb(10, out_dir="dexycb_results", resize=None)
+    # dataset.visualize_manos_in_rgb(10, out_dir="dexycb_results", resize=None)
 
     # less =0
     # more =0
