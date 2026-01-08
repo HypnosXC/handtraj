@@ -112,37 +112,66 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     if resize is not None:
         width, height = resize
     else:
-        width = width * (len(Trajs)+1)
+        width = width * 2
     # 确定视频编码器
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
     
     # 创建视频写入对象
     out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
     print("start making the video")
+    # for i in range(subseq_len):
+    #     image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8),cv2.COLOR_RGB2BGR)
+    #     composited =  image
+    #     for j in range(len(Trajs)):
+    #         vertices=vertices_list[j]
+    #         faces = faces_list[j]
+    #         if len(intrinsics.shape)==2:
+    #             render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+    #                                                                 intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+    #         else:
+    #             render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+    #                                                                 intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+    #         # breakpoint()
+    #         border_width = 10
+    #         composited_tmp = np.where(
+    #             binary_dilation(
+    #                 render_mask, np.ones((border_width, border_width), dtype=bool)
+    #             )[:, :, None],
+    #             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+    #             image,
+    #         )
+    #         composited_tmp = np.where(render_mask[:, :, None], render_rgb, image)
+    #         composited = np.concatenate([composited,composited_tmp], axis=1)
+    #     if resize is not None:
+    #         composited = cv2.resize(composited, resize)
+    #     out.write(composited)
+    # out.release()
     
     for i in range(subseq_len):
-        image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8),cv2.COLOR_RGB2BGR)
-        composited =  image
+        image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+        composited = image.copy()  # 初始化为原图像的拷贝，避免修改原图像
         for j in range(len(Trajs)):
-            vertices=vertices_list[j]
+            vertices = vertices_list[j]
             faces = faces_list[j]
-            if len(intrinsics.shape)==2:
+            if len(intrinsics.shape) == 2:
                 render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                                    intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+                                                                intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
             else:
                 render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                                    intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+                                                                intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
             # breakpoint()
-            border_width = 10
-            composited_tmp = np.where(
+            border_width = 5
+            # 先添加边框（如果多个traj，可能需要不同颜色或调整逻辑；这里假设共享边框颜色）
+            composited = np.where(
                 binary_dilation(
                     render_mask, np.ones((border_width, border_width), dtype=bool)
                 )[:, :, None],
                 np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-                image,
+                composited,
             )
-            composited_tmp = np.where(render_mask[:, :, None], render_rgb, image)
-            composited = np.concatenate([composited,composited_tmp], axis=1)
+            # 叠加当前traj的渲染到composited上
+            composited = np.where(render_mask[:, :, None], render_rgb, composited)
+        composited = np.concatenate([image,composited], axis=1)
         if resize is not None:
             composited = cv2.resize(composited, resize)
         out.write(composited)
@@ -171,7 +200,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/public/home/group_ucb/xuchen/handtraj/experiments/hand_train_differential_clip/v2/checkpoints_300000/")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
+    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/only_interhand/v1/checkpoints_25000")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -440,7 +469,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="train",dataset_name = 'ho3d',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'interhand26m',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer

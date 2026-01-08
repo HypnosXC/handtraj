@@ -195,6 +195,7 @@ class HandDenoiserConfig:
     dropout_p: float = 0.0
     using_mat: bool = True
     using_img_feat: bool = False
+    in_context_learning: bool = False
     activation: Literal["gelu", "relu"] = "gelu"
 
     positional_encoding: Literal["transformer", "rope"] = "rope"
@@ -403,25 +404,46 @@ class HandDenoiser(nn.Module):
                 for _ in range(config.encoder_layers)
             ]
         )
-        self.decoder_layers = nn.ModuleList(
-            [
-                TransformerBlock(
-                    TransformerBlockConfig(
-                        d_latent=config.d_latent,
-                        d_noise_emb=config.d_noise_emb,
-                        d_feedforward=config.d_feedforward,
-                        n_heads=config.num_heads,
-                        dropout_p=config.dropout_p,
-                        activation=config.activation,
-                        include_xattn=True,  # Include conditioning for the decoder.
-                        use_rope_embedding=config.positional_encoding == "rope",
-                        use_film_noise_conditioning=config.noise_conditioning == "film",
-                        xattn_mode=config.xattn_mode,
+        if config.in_context_learning:
+            self.decoder_layers = nn.ModuleList(
+                [
+                    TransformerBlock(
+                        TransformerBlockConfig(
+                            d_latent=2*config.d_latent,
+                            d_noise_emb=config.d_noise_emb,
+                            d_feedforward=config.d_feedforward,
+                            n_heads=config.num_heads,
+                            dropout_p=config.dropout_p,
+                            activation=config.activation,
+                            include_xattn=False,  # No conditioning for encoder.
+                            use_rope_embedding=config.positional_encoding == "rope",
+                            use_film_noise_conditioning=config.noise_conditioning == "film",
+                            xattn_mode=config.xattn_mode,
+                        )
                     )
-                )
-                for _ in range(config.decoder_layers)
-            ]
-        )
+                    for _ in range(config.encoder_layers)
+                ]
+            )
+        else:
+            self.decoder_layers = nn.ModuleList(
+                [
+                    TransformerBlock(
+                        TransformerBlockConfig(
+                            d_latent=config.d_latent,
+                            d_noise_emb=config.d_noise_emb,
+                            d_feedforward=config.d_feedforward,
+                            n_heads=config.num_heads,
+                            dropout_p=config.dropout_p,
+                            activation=config.activation,
+                            include_xattn=True,  # Include conditioning for the decoder.
+                            use_rope_embedding=config.positional_encoding == "rope",
+                            use_film_noise_conditioning=config.noise_conditioning == "film",
+                            xattn_mode=config.xattn_mode,
+                        )
+                    )
+                    for _ in range(config.decoder_layers)
+                ]
+            )
 
     def get_d_state(self) -> int:
         return HandDenoiseTraj.get_packed_dim(self.config.using_mat)
@@ -533,10 +555,16 @@ class HandDenoiser(nn.Module):
         # Forward pass through transformer.
         for layer in self.encoder_layers:
             encoder_out = layer(encoder_out, attn_mask, noise_emb=noise_emb)
-        for layer in self.decoder_layers:
-            decoder_out = layer(
-                decoder_out, attn_mask, noise_emb=noise_emb, cond=encoder_out
-            )
+        if config.in_context_learning:
+            decoder_out = torch.cat([decoder_out, encoder_out], dim=-1)
+            for layer in self.decoder_layers:
+                decoder_out = layer(decoder_out, attn_mask, noise_emb=noise_emb)
+            decoder_out = decoder_out[:, :, :config.d_latent]
+        else:
+            for layer in self.decoder_layers:
+                decoder_out = layer(
+                    decoder_out, attn_mask, noise_emb=noise_emb, cond=encoder_out
+                )
 
         # Remove the extra token corresponding to the noise embedding.
         if self.noise_emb_token_proj is not None:
