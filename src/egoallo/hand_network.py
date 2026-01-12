@@ -192,7 +192,7 @@ class HandDenoiserConfig:
     num_heads: int = 4
     encoder_layers: int = 6
     decoder_layers: int = 6
-    dropout_p: float = 0.0
+    dropout_p: float = 0.2
     using_mat: bool = True
     using_img_feat: bool = False
     in_context_learning: bool = False

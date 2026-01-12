@@ -108,11 +108,12 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
         vertices_list.append(vertices)
     intrinsics = intrinsics.cpu().numpy()
     border_color = [255, 0, 0]
-    video_len, height, width, _ = rgb_frames.shape
+    video_len, img_height, img_width, _ = rgb_frames.shape
     if resize is not None:
         width, height = resize
     else:
-        width = width * 2
+        width = img_width * 2
+        height = img_height
     # 确定视频编码器
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
     
@@ -146,7 +147,37 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     #         composited = cv2.resize(composited, resize)
     #     out.write(composited)
     # out.release()
-    
+    image = cv2.cvtColor(rgb_frames[0].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+    composited = np.zeros_like(image)  # 初始化为白色背景
+    out_image = None
+    for i in range(0,subseq_len,6):
+        if len(Trajs) > 1:
+            break
+        j=0
+        vertices = vertices_list[j]
+        faces = faces_list[j]
+        if len(intrinsics.shape) == 2:
+            render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+                                                            intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+        else:
+            render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
+                                                            intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+        border_width = 5
+        composited = np.where(
+            binary_dilation(
+                render_mask, np.ones((border_width, border_width), dtype=bool)
+            )[:, :, None],
+            np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+            composited,
+        )
+        # 叠加当前traj的渲染到composited上
+        composited = np.where(render_mask[:, :, None], render_rgb, composited)
+        if resize is not None:
+            composited = cv2.resize(composited, resize)
+        out_image = composited
+    if out_image is not None:
+        output_path = os.path.join(out_dir, f'hand_motion_traj.png') 
+        cv2.imwrite(output_path, out_image)
     for i in range(subseq_len):
         image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
         composited = image.copy()  # 初始化为原图像的拷贝，避免修改原图像
@@ -200,7 +231,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/only_interhand/v1/checkpoints_25000")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
+    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/only_interhand/v1/checkpoints_50000")#("/data-share/L202500064/handtraj/experiments/in_context_learning/v5/checkpoints_200000")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -469,7 +500,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'interhand26m',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'arctic',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -597,9 +628,9 @@ def main(args: Args) -> None:
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
             pred_list = [x_0_packed]
-            for i in range(3):
-                pred = inference_and_visualize(denoiser_network,train_batch,device,False)
-                pred_list.append(pred)
+            # for i in range(5):
+            #     pred = inference_and_visualize(denoiser_network,train_batch,device,False)
+            #     pred_list.append(pred)
             visualize_joints_in_rgb(pred_list,
                                     intrinsics=train_batch.intrinsics.squeeze(0),
                                     rgb_frames=train_batch.rgb_frames.squeeze(0),

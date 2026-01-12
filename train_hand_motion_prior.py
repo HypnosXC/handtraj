@@ -124,6 +124,7 @@ def run_training(
     # Setup model and data loader
     model = hand_network.HandDenoiser(config.model)
     model_config = model.config
+    datasetname='all'
     train_dataset = HandHdf5Dataset(
         # config.dataset_hdf5_path,
         # config.dataset_files_path,
@@ -131,12 +132,12 @@ def run_training(
         # subseq_len=config.subseq_len,
         # cache_files=True,
         # slice_strategy=config.dataset_slice_strategy,
-        dataset_name='interhand26m',
+        dataset_name=datasetname,
         # vis=True
         # min_len=32,
         # clip_stride=16,
     )
-    
+    print("process at dataset", datasetname)
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
