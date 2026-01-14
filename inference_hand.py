@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from pathlib import Path
-
+import open3d as o3d
 import numpy as np
 import torch
 import viser
@@ -87,6 +87,91 @@ def render_joint(
     color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)  # type: ignore
     mask = color[..., -1] > 0
     return color[..., :3], rend_depth, mask
+# Function to create a natural skin-like texture
+import numpy as np
+import open3d as o3d
+import cv2
+
+def create_skin_texture(size=(512, 512)):
+    base_color = np.array([200, 150, 130], dtype=np.uint8)  # Skin base (BGR)
+    texture = np.full((size[0], size[1], 3), base_color, dtype=np.uint8)
+    noise = np.random.normal(0, 20, size=(size[0], size[1], 3)).astype(np.int16)
+    texture = np.clip(texture + noise, 0, 255).astype(np.uint8)
+    grad_x = np.linspace(0, 1, size[1])
+    grad_y = np.linspace(0, 1, size[0])[:, None]
+    gradient = (grad_x + grad_y) / 2
+    texture = np.clip(texture * (1 - 0.2 * gradient[..., None]), 0, 255).astype(np.uint8)
+    texture = cv2.GaussianBlur(texture, (15, 15), 0)
+    return texture
+
+# Safe check for CUDA availability
+def is_cuda_available_safe():
+    try:
+        return o3d.core.cuda.device_count() > 0
+    except AttributeError:
+        return False
+
+# Improved offscreen render: Use dictionary access for attributes
+def render_joint_with_texture(vertices, faces, intrinsics, h, w, texture_image=None):
+    cuda_available = is_cuda_available_safe()
+    device = o3d.core.Device("CUDA:0") if cuda_available else o3d.core.Device("CPU:0")
+    print(f"Using device for render: {device}")  # Debug print
+    
+    # Create tensor-based TriangleMesh on device
+    mesh = o3d.t.geometry.TriangleMesh(device=device)
+    
+    # Set positions and indices using dictionary
+    mesh.vertex["positions"] = o3d.core.Tensor(vertices, dtype=o3d.core.Dtype.Float32, device=device)
+    mesh.triangle["indices"] = o3d.core.Tensor(faces, dtype=o3d.core.Dtype.Int64, device=device)
+    
+    # Create natural texture if none
+    if texture_image is None:
+        texture_image = create_skin_texture()
+    
+    # Generate UVs (spherical projection for demo)
+    verts_np = np.asarray(mesh.vertex["positions"].cpu().numpy())  # Temp to CPU for np ops
+    norms = np.linalg.norm(verts_np, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    uv = np.zeros((len(verts_np), 2))
+    uv[:, 0] = np.arctan2(verts_np[:, 0], verts_np[:, 2]) / (2 * np.pi) + 0.5
+    uv[:, 1] = np.arcsin(verts_np[:, 1] / norms[:, 0]) / np.pi + 0.5
+    faces_flat = faces.reshape(-1)
+    mesh.triangle["uvs"] = o3d.core.Tensor(uv[faces_flat], dtype=o3d.core.Dtype.Float32, device=device)
+    
+    # Texture as tensor image on device
+    o3d_texture = o3d.cuda.pybind.geometry.Image(texture_image)
+    # o3d_texture = o3d_texture.to(device=device)
+    # print(f"Texture device after transfer: {o3d_texture.device}")  # Debug print
+    
+    # Material setup
+    material = o3d.visualization.rendering.MaterialRecord()
+    material.base_color = [1.0, 1.0, 1.0, 1.0]
+    material.shader = "defaultLit"
+    print(type(o3d_texture))
+    material.albedo_img = o3d_texture
+    
+    # Compute normals on device
+    mesh.compute_vertex_normals()
+    
+    # Offscreen renderer
+    renderer = o3d.visualization.rendering.OffscreenRenderer(width=w, height=h)
+    renderer.scene.scene.enable_sun_light(True)
+    renderer.scene.scene.set_background([0.0, 0.0, 0.0, 1.0])  # Black
+    renderer.scene.add_geometry("mesh", mesh, material)
+    
+    # Camera
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    renderer.setup_camera(fx, fy, cx, cy, [0, 0, 0], [0, 0, 1], [0, -1, 0])  # Adjust extrinsic if needed
+    
+    # Render
+    color = renderer.render_to_image()
+    depth = renderer.render_to_depth_image()
+    
+    render_rgb = np.asarray(color)[:, :, :3].astype(np.uint8)  # RGB to BGR if needed: cv2.cvtColor(..., cv2.COLOR_RGB2BGR)
+    rend_depth = np.asarray(depth)
+    render_mask = (rend_depth > 0).astype(bool)
+    
+    return render_rgb, rend_depth, render_mask
 
 def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
                             intrinsics:torch.FloatTensor,
@@ -146,38 +231,95 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     #     if resize is not None:
     #         composited = cv2.resize(composited, resize)
     #     out.write(composited)
-    # out.release()
+    # out.release()import trimesh
+
+
+    # Main code with improvements: Use textured render, handle empty cases better
+    height, width = rgb_frames.shape[1], rgb_frames.shape[2]  # From rgb_frames (N, H, W, C)
+
     image = cv2.cvtColor(rgb_frames[0].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-    composited = np.zeros_like(image)  # 初始化为白色背景
+    composited = np.zeros_like(image)  # Black background (or np.ones_like(image)*255 for white)
     out_image = None
-    for i in range(0,subseq_len,6):
+    loop_executed = False
+
+    # Collect traj_points for fixed vertex
+    fixed_vertex_index = 0  # e.g., wrist
+    traj_points = []
+    traj_color = (0, 255, 0)  # Green
+    traj_thickness = 2
+    draw_points = True
+    point_radius = 3
+    point_color = (255, 0, 0)  # Red
+    for i in range(0, subseq_len, 24):
         if len(Trajs) > 1:
+            print("len(Trajs) is ", len(Trajs), " only process the first one for traj visualization")
             break
-        j=0
+        loop_executed = True
+        print("process wrist trajs")
+        j = 0
         vertices = vertices_list[j]
         faces = faces_list[j]
         if len(intrinsics.shape) == 2:
-            render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                            intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+            render_rgb, rend_depth, render_mask = render_joint_with_texture(
+                vertices[i], faces, intrinsics[i], h=height, w=width
+            )
+            # Project fixed vertex to 2D
+            vertex_3d = vertices[i][fixed_vertex_index]
+            fx, fy, cx, cy = intrinsics[i][0], intrinsics[i][1], intrinsics[i][2], intrinsics[i][3]
+            if vertex_3d[2] != 0:  # Avoid div by zero
+                u = int(fx * vertex_3d[0] / vertex_3d[2] + cx)
+                v = int(fy * vertex_3d[1] / vertex_3d[2] + cy)
+                traj_points.append((u, v))
         else:
-            render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                            intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
+            render_rgb, rend_depth, render_mask = render_joint_with_texture(
+                vertices[i], faces, intrinsics, h=height, w=width
+            )
+            # Project fixed vertex
+            vertex_3d = vertices[i][fixed_vertex_index]
+            fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
+            if vertex_3d[2] != 0:
+                u = int(fx * vertex_3d[0] / vertex_3d[2] + cx)
+                v = int(fy * vertex_3d[1] / vertex_3d[2] + cy)
+                traj_points.append((u, v))
+        
+        if render_mask.size == 0 or render_rgb.size == 0:
+            print(f"Warning: Empty render at frame {i}. Skipping.")
+            continue
+        
         border_width = 5
-        composited = np.where(
-            binary_dilation(
-                render_mask, np.ones((border_width, border_width), dtype=bool)
-            )[:, :, None],
-            np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-            composited,
-        )
-        # 叠加当前traj的渲染到composited上
+        dilated_mask = binary_dilation(render_mask, np.ones((border_width, border_width), dtype=bool))[:, :, None]
+        composited = np.where(dilated_mask, np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8), composited)
         composited = np.where(render_mask[:, :, None], render_rgb, composited)
+        
         if resize is not None:
             composited = cv2.resize(composited, resize)
+        
         out_image = composited
-    if out_image is not None:
-        output_path = os.path.join(out_dir, f'hand_motion_traj.png') 
+    # Draw trajectory on final composited image
+    if out_image is not None and len(traj_points) > 1:
+        # Simple lines
+        for p in range(1, len(traj_points)):
+            cv2.line(out_image, traj_points[p-1], traj_points[p], traj_color, traj_thickness)
+        
+        # Optional: Smooth spline
+        # if len(traj_points) >= 4:
+        #     x, y = zip(*traj_points)
+        #     tck, u = splprep([x, y], s=0)
+        #     new_points = splev(np.linspace(0, 1, 100), tck)
+        #     for p in range(1, len(new_points[0])):
+        #         pt1 = (int(new_points[0][p-1]), int(new_points[1][p-1]))
+        #         pt2 = (int(new_points[0][p]), int(new_points[1][p]))
+        #         cv2.line(out_image, pt1, pt2, traj_color, traj_thickness)
+        
+        if draw_points:
+            for pt in traj_points:
+                cv2.circle(out_image, pt, point_radius, point_color, -1)
+
+    # Save with checks
+    if out_image is not None and out_image.size > 0:
+        output_path = os.path.join(out_dir, f'hand_motion_traj.png')
         cv2.imwrite(output_path, out_image)
+
     for i in range(subseq_len):
         image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
         composited = image.copy()  # 初始化为原图像的拷贝，避免修改原图像
@@ -231,7 +373,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/only_interhand/v1/checkpoints_50000")#("/data-share/L202500064/handtraj/experiments/in_context_learning/v5/checkpoints_200000")# Path("./experiments/hand_train_rot_mat/v0/checkpoints_100000/")# #
+    checkpoint_dir: Path = Path("/data-share/L202500061/handtraj/experiments/stride4_arctic_fp_accelerate/v0/checkpoints_ep36600_878399")#("/data-share/L202500064/handtraj/experiments/cfg_train/v1/checkpoints_400000")
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -500,7 +642,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'arctic',vis=True,clip_stride=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'arctic',vis=True,subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -603,21 +745,21 @@ def main(args: Args) -> None:
         if visualized == True:
             num_samples = 1
             for i in range(num_samples):
-                data_id = random.randint(1,len(dataset))
+                data_id = 2023 #random.randint(1,len(dataset))
                 rand_id = data_id
                 sample = dataset.__getitem__(data_id,resize=None)
                 train_batch.append(sample)
             keys = vars(train_batch[0]).keys()
             train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
-            
+            subseq_len = train_batch.mano_pose.shape[1]
             pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
             _,_,joints_pred = pred.apply_to_hand()
             x_0_packed = hand_network.HandDenoiseTraj(
-                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((1, 64, 10)),
-                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(1,64,15,3),
+                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((1, subseq_len, 10)),
+                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(1,subseq_len,15,3),
                                                             global_orientation=train_batch.mano_pose[:,:,0:3],
                                                             global_translation=train_batch.mano_pose[:,:,48:],
-                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand(1, 64, -1),
+                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand(1,subseq_len, -1),
                                                     )
             _,_,joints_gt = x_0_packed.apply_to_hand()
             loss_mask = train_batch.mask
@@ -628,6 +770,7 @@ def main(args: Args) -> None:
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
             pred_list = [x_0_packed]
+            print("reach visualization here!")
             # for i in range(5):
             #     pred = inference_and_visualize(denoiser_network,train_batch,device,False)
             #     pred_list.append(pred)
