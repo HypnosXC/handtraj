@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 import open3d as o3d
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import viser
 import yaml
@@ -139,7 +140,8 @@ def render_joint_with_texture(vertices, faces, intrinsics, h, w, texture_image=N
     mesh.triangle["uvs"] = o3d.core.Tensor(uv[faces_flat], dtype=o3d.core.Dtype.Float32, device=device)
     
     # Texture as tensor image on device
-    o3d_texture = o3d.cuda.pybind.geometry.Image(texture_image)
+    texture = o3d.t.geometry.Image(texture_image).to(device)
+    #o3d_texture = o3d.cuda.pybind.geometry.Image(texture_image)
     # o3d_texture = o3d_texture.to(device=device)
     # print(f"Texture device after transfer: {o3d_texture.device}")  # Debug print
     
@@ -147,8 +149,11 @@ def render_joint_with_texture(vertices, faces, intrinsics, h, w, texture_image=N
     material = o3d.visualization.rendering.MaterialRecord()
     material.base_color = [1.0, 1.0, 1.0, 1.0]
     material.shader = "defaultLit"
-    print(type(o3d_texture))
-    material.albedo_img = o3d_texture
+    if isinstance(texture, o3d.t.geometry.Image):
+        legacy_texture = texture.to_legacy()
+        material.albedo_img = legacy_texture
+    else:
+        material.albedo_img = texture
     
     # Compute normals on device
     mesh.compute_vertex_normals()
@@ -642,7 +647,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'arctic',vis=True,subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=False,subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -745,7 +750,7 @@ def main(args: Args) -> None:
         if visualized == True:
             num_samples = 1
             for i in range(num_samples):
-                data_id = 2023 #random.randint(1,len(dataset))
+                data_id = random.randint(1,len(dataset)) # 2023 for arctic
                 rand_id = data_id
                 sample = dataset.__getitem__(data_id,resize=None)
                 train_batch.append(sample)
@@ -769,11 +774,11 @@ def main(args: Args) -> None:
             error_joints = (torch.where(loss_mask,error_joints,torch.zeros_like(error_joints)).sum()/loss_mask.sum()).numpy()*1000
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
-            pred_list = [x_0_packed]
+            pred_list = []#[x_0_packed]
             print("reach visualization here!")
-            # for i in range(5):
-            #     pred = inference_and_visualize(denoiser_network,train_batch,device,False)
-            #     pred_list.append(pred)
+            for i in range(5):
+                pred = inference_and_visualize(denoiser_network,train_batch,device,False)
+                pred_list.append(pred)
             visualize_joints_in_rgb(pred_list,
                                     intrinsics=train_batch.intrinsics.squeeze(0),
                                     rgb_frames=train_batch.rgb_frames.squeeze(0),
@@ -789,9 +794,18 @@ def main(args: Args) -> None:
                                                     pin_memory=True,
                                                     collate_fn=collate_dataclass,
                                                     drop_last=False)
+            var_batch = []
+            mean_batch=[]
             for train_batch in dataloader:
                 total_size += train_batch.mano_betas.shape[0]
-                pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
+                joints_list = []
+                for i in range(10):
+                    pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
+                    _,_,joints_pred = pred.apply_to_hand()
+                    joints_list.append(joints_pred) # BxTxJx3
+                variance,mean = cal_variance(joints_list) 
+                var_batch.append(variance.cpu().numpy())
+                mean_batch.append(mean.cpu().numpy())
                 batch,seq_len,_ = train_batch.mano_pose.shape
                 loss_mask = train_batch.mask
                 x_0_packed = hand_network.HandDenoiseTraj(
@@ -813,12 +827,106 @@ def main(args: Args) -> None:
                         errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy() * 1000
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
-            
+            var_batch = np.stack(var_batch,axis=0) # N x J
+            mean_batch = np.stack(mean_batch,axis=0) # N x J
+            print(var_batch.shape)
+            mean_variance = np.mean(var_batch,axis=0) # J
+            final_mean = np.mean(mean_batch,axis=0) # J
+            print(mean_variance)
+            plot_joint_variance_curve( mean_variance)
+            plot_joint_variance_curve(final_mean, title="Joint Mean Curve", line_color='green',name='mean')
 
 
+def cal_variance(joints_list):
+    """joints_list: list of BxTxJx3"""
+    batch,seq_len,num_joints,_ = joints_list[0].shape
+    sample_num = len(joints_list)
+    stacked_joints = torch.stack(joints_list, dim=0).permute(3,4,1,2,0)# [J,3,B,T,S]
+    stacked_joints_var = torch.var(stacked_joints, dim=-1).reshape(num_joints,-1)  # [J,3*B*T]
+    stacked_joint_mean = torch.mean(stacked_joints.reshape(num_joints,-1), dim=-1)  # [J,3*B*T]
+    variance = stacked_joints_var.mean(dim=1)  # [J]
+    return variance,stacked_joint_mean
     
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+
+def plot_joint_variance_curve( vars,
+                               #means,
+                               title="Joint Variance Curve",
+                               figsize=(12, 6),
+                               line_color='blue',
+                               joint_names=None,
+                               fill_alpha=0.2,
+                               show_std=True,
+                               name="var"):
+    """
+    绘制关节方差曲线图
     
+    Args:
+        joints: shape=(batch, time, joint_num, 3)
+        joint_names: 关节名称列表，可选
+        title: 图表标题
+        figsize: 图表大小
+        line_color: 曲线颜色
+        fill_alpha: 填充区域的透明度
+        show_std: 是否显示标准差区域
+    """
+    joint_num = vars.shape[0]
+    # 如果没有提供关节名称，使用数字索引
+    if joint_names is None:
+        joint_names = [f"J{i}" for i in range(joint_num)]
     
+    # 计算每个关节的方差和标准差
+    joint_variances = vars
+    # joint_std = means
+    
+    # 创建图表
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # x轴位置
+    x_positions = np.arange(joint_num)
+    
+    # 绘制方差曲线
+    ax.plot(x_positions, joint_variances, 
+            marker='o', markersize=8, linewidth=3, 
+            color=line_color, label=name)
+    
+    #如果需要，添加标准差区域
+    # if show_std:
+    #     ax.fill_between(x_positions, 
+    #                     joint_variances - joint_std,
+    #                     joint_variances + joint_std,
+    #                     alpha=fill_alpha, color=line_color,
+    #                     label='± Std Dev')
+    
+    # 设置坐标轴
+    ax.set_xlabel('Joint Index', fontsize=12)
+    ax.set_ylabel('Value', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(joint_names, rotation=45, ha='right')
+    
+    # 添加网格
+    ax.grid(True, linestyle='--', alpha=0.5)
+    
+    # 添加图例
+    ax.legend(loc='best')
+    
+    # 在每个点上添加方差值
+    for i, v in enumerate(joint_variances):
+        if v<1e6:
+            ax.text(i, v * 1.05, f'{v:.8f}', 
+                    ha='center', fontsize=9, fontweight='bold')
+        else:
+            ax.text(i, v * 1.001, f'{v:.8f}', 
+                    ha='center', fontsize=9, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.show()
+    plt.savefig('./tmp/'+name+'.png', dpi=300, bbox_inches='tight')
+    return 0
 if __name__ == "__main__":
     import tyro
     main(tyro.cli(Args))
