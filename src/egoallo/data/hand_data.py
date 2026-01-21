@@ -210,7 +210,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self.split = split
 
         if dataset_name=="dexycb":
-            self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/dexycb/dexycb.hdf5"
+            self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/dexycb/dexycb_v2.hdf5"
             self.video_root = "/data-share/share-folder/handdata/preprocessed/dexycb/picked_videos"
         elif dataset_name=="interhand26m":
             self._hdf5_path = "/data-share/share-folder/handdata/preprocessed/interhand26m/interhand26m.hdf5"
