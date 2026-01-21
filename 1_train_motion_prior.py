@@ -18,7 +18,6 @@ from egoallo import network, training_loss, training_utils
 from egoallo.data.amass import EgoAmassHdf5Dataset
 from egoallo.data.dataclass import collate_dataclass
 
-import wandb
 
 @dataclasses.dataclass(frozen=True)
 class EgoAlloTrainConfig:
@@ -69,24 +68,11 @@ def get_experiment_dir(experiment_name: str, version: int = 0) -> Path:
 def run_training(
     config: EgoAlloTrainConfig,
     restore_checkpoint_dir: Path | None = None,
-    use_wandb_logger: bool = False,
-    wandb_entity: str = "liyunqi-annie",
 ) -> None:
-    
     # Set up experiment directory + HF accelerate.
     # We're getting to manage logging, checkpoint directories, etc manually,
     # and just use `accelerate` for distibuted training.
     experiment_dir = get_experiment_dir(config.experiment_name)
-    if use_wandb_logger:
-        exper_name1 = experiment_dir.parent.name
-        exper_name2 = experiment_dir.name
-        wandb_project_name = exper_name1 + '-' + exper_name2
-        print(f"wandb project name: {wandb_project_name}")
-        run = wandb.init(
-            entity=wandb_entity,
-            project="white-egoallo",
-            name=wandb_project_name,
-        )
     assert not experiment_dir.exists()
     accelerator = Accelerator(
         project_config=ProjectConfiguration(project_dir=str(experiment_dir)),
@@ -108,7 +94,7 @@ def run_training(
         (experiment_dir / "git_commit.txt").write_text(
             training_utils.get_git_commit_hash()
         )
-        # (experiment_dir / "git_diff.txt").write_text(training_utils.get_git_diff())
+        (experiment_dir / "git_diff.txt").write_text(training_utils.get_git_diff())
         (experiment_dir / "run_config.yaml").write_text(yaml.dump(config))
         (experiment_dir / "model_config.yaml").write_text(yaml.dump(config.model))
 
@@ -189,6 +175,7 @@ def run_training(
                 model,
                 unwrapped_model=accelerator.unwrap_model(model),
                 train_batch=train_batch,
+                using_mat=True
             )
             log_outputs["learning_rate"] = scheduler.get_last_lr()[0]
             accelerator.log(log_outputs, step=step)
@@ -218,13 +205,6 @@ def run_training(
                     f" lr: {scheduler.get_last_lr()[0]:.7f}"
                     f" loss: {loss.item():.6f}"
                 )
-                if use_wandb_logger:
-                    wandb.log({
-                        "step": step,
-                        "learning_rate": scheduler.get_last_lr()[0],
-                        "loss": loss.item(),
-                        **log_outputs,
-                    })
 
             # Checkpointing.
             if step % 5000 == 0:
@@ -238,8 +218,7 @@ def run_training(
                     shutil.rmtree(prev_checkpoint_path)
                 prev_checkpoint_path = None if step % 100_000 == 0 else checkpoint_path
                 del checkpoint_path
-    if use_wandb_logger:
-        run.finish()
+
 
 if __name__ == "__main__":
     tyro.cli(run_training)

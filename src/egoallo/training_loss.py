@@ -9,16 +9,16 @@ from torch import Tensor
 from torch._dynamo import OptimizedModule
 from torch.nn.parallel import DistributedDataParallel
 
-from . import network
+from . import network, hand_network
 from .data.amass import EgoTrainingData
+from .data.dataclass import HandTrainingData
 from .sampling import CosineNoiseScheduleConstants
 from .transforms import SO3
-
 
 @dataclasses.dataclass(frozen=True)
 class TrainingLossConfig:
     cond_dropout_prob: float = 0.0
-    beta_coeff_weights: tuple[float, ...] = tuple(1 / (i + 1) for i in range(16))
+    beta_coeff_weights: tuple[float, ...] = tuple(1 / (i + 1) for i in range(10))
     loss_weights: dict[str, float] = dataclasses.field(
         default_factory={
             "betas": 0.1,
@@ -26,6 +26,13 @@ class TrainingLossConfig:
             "contacts": 0.1,
             # We don't have many hands in the AMASS dataset...
             "hand_rotmats": 0.01,
+            "mano_betas": 0.1,
+            "mano_poses": 1.0,
+            "mano_poses_mat": 1.0,
+            "global_orientation": 1.0,
+            "global_ori_mat": 1.0,
+            "global_translation": 1.0,
+            "mano_side": 1.0
         }.copy
     )
     weight_loss_by_t: Literal["emulate_eps_pred"] = "emulate_eps_pred"
@@ -55,6 +62,166 @@ class TrainingLossComputer:
         # Pad for numerical stability, and scale between [padding, 1.0].
         padding = 0.01
         self.weight_t = weight_t / weight_t[1] * (1.0 - padding) + padding
+    def compute_hand_denoising_loss(
+        self,
+        model: hand_network.HandDenoiser | DistributedDataParallel | OptimizedModule,
+        unwrapped_model: hand_network.HandDenoiser,
+        train_batch: HandTrainingData,
+        using_mat: bool,
+        using_img_feat:bool
+    ) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute a training loss for the HandDenoiser model.
+
+        Returns:
+            A tuple (loss tensor, dictionary of things to log).
+        """
+        log_outputs: dict[str, Tensor | float] = {}
+        batch, time, dim = train_batch.mano_pose.shape
+        assert dim == 51
+        if using_img_feat:
+            cond_feat = train_batch.img_feature
+        else:
+            cond_feat = None
+        x_0 = hand_network.HandDenoiseTraj(
+            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, time, 10)),
+            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,time,15,3),
+            global_orientation=train_batch.mano_pose[:,:,0:3],
+            global_translation=train_batch.mano_pose[:,:,48:],
+            mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, time, -1)),
+        )
+        rel_palm_pose = train_batch.mano_pose[:,:,48:]
+        x_0_packed = x_0.pack(using_mat=using_mat)
+        device = x_0_packed.device
+        assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
+
+        # Diffuse.
+        t = torch.randint(
+            low=1,
+            high=unwrapped_model.config.max_t + 1,
+            size=(batch,),
+            device=device,
+        )
+        eps = torch.randn(x_0_packed.shape, dtype=x_0_packed.dtype, device=device)
+        assert self.noise_constants.alpha_bar_t.shape == (
+            unwrapped_model.config.max_t + 1,
+        )
+        alpha_bar_t = self.noise_constants.alpha_bar_t[t, None, None]
+        assert alpha_bar_t.shape == (batch, 1, 1)
+        flag = torch.randint(
+            low=0,
+            high=1,
+            size=(batch,),
+            device=device,
+        )
+        x_t_packed = (
+            torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
+        )
+        # x_t_pack_half = torch.cat([x_0_packed[:, :time//2,:], x_t_packed_full[:, time//2:,:]], dim=1)
+        # x_t_pack_quart = torch.cat([x_0_packed[:, :time//4,:], x_t_packed_full[:, time//4:,:]], dim=1)
+        # mask_quart = (flag < 0.25).view(256, 1, 1)      # [256, 1, 1]
+        # mask_half  = ((flag >= 0.25) & (flag <= 0.5)).view(256, 1, 1)
+        # mask_full  = (flag > 0.5).view(256, 1, 1)
+
+        # x_t_packed = (mask_quart * x_t_pack_quart + 
+        #               mask_half  * x_t_pack_half + 
+        #               mask_full  * x_t_packed_full)
+        # # Denoise.
+        x_0_packed_pred = model.forward(
+            x_t_packed=x_t_packed,
+            t=t,
+            rel_palm_pose=rel_palm_pose,
+            project_output_rotmats=False,
+            mask=train_batch.mask,
+            cond_dropout_keep_mask=torch.rand((batch,), device=device)
+            > self.config.cond_dropout_prob
+            if self.config.cond_dropout_prob > 0.0
+            else None,
+            conds = x_0,
+            img_feat = cond_feat
+        )
+        assert isinstance(x_0_packed_pred, torch.Tensor)
+        x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0.mano_side)
+
+        weight_t = self.weight_t[t].to(device)
+        assert weight_t.shape == (batch,)
+
+        def weight_and_mask_loss(
+            loss_per_step: Float[Tensor, "b t d"],
+            # bt stands for "batch time"
+            bt_mask: Bool[Tensor, "b t"] = train_batch.mask,
+            bt_mask_sum: Int[Tensor, ""] = torch.sum(train_batch.mask),
+        ) -> Float[Tensor, ""]:
+            """Weight and mask per-timestep losses (squared errors)."""
+            _, _, d = loss_per_step.shape
+            assert loss_per_step.shape == (batch, time, d)
+            assert bt_mask.shape == (batch, time)
+            assert weight_t.shape == (batch,)
+            return (
+                # Sum across b axis.
+                torch.sum(
+                    # Sum across t axis.
+                    torch.sum(
+                        # Mean across d axis.
+                        torch.mean(loss_per_step, dim=-1) * bt_mask,
+                        dim=-1,
+                    )
+                    * weight_t
+                )
+                / bt_mask_sum
+            )
+        if using_mat:
+            loss_terms: dict[str, Tensor | float] = {
+            "mano_betas": weight_and_mask_loss(
+                # (b, t, 10)
+                (x_0_pred.mano_betas - x_0.mano_betas) ** 2
+                # (10,)
+                * x_0.mano_betas.new_tensor(self.config.beta_coeff_weights),
+            ),
+            "mano_poses_mat": weight_and_mask_loss(
+                # (b, t, 15 * 3)
+                (x_0_pred.mano_poses_mat - x_0.mano_poses_mat).reshape(
+                    (batch, time, 15 * 9)
+                )
+                ** 2,
+            ),
+            "global_ori_mat": weight_and_mask_loss((x_0_pred.global_ori_mat - x_0.global_ori_mat) ** 2),
+            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
+            "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
+            }
+        else:
+            loss_terms: dict[str, Tensor | float] = {
+            "mano_betas": weight_and_mask_loss(
+                # (b, t, 10)
+                (x_0_pred.mano_betas - x_0.mano_betas) ** 2
+                # (10,)
+                * x_0.mano_betas.new_tensor(self.config.beta_coeff_weights),
+            ),
+            "mano_poses": weight_and_mask_loss(
+                # (b, t, 15 * 3)
+                (x_0_pred.mano_poses - x_0.mano_poses).reshape(
+                    (batch, time, 15 * 3)
+                )
+                ** 2,
+            ),
+            "global_orientation": weight_and_mask_loss((x_0_pred.global_orientation - x_0.global_orientation) ** 2),
+            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
+            "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
+            }
+
+
+        # assert loss_terms.keys() == self.config.loss_weights.keys()
+
+        # Log loss terms.
+        for name, term in loss_terms.items():
+            log_outputs[f"loss_term/{name}"] = term
+
+        # Return loss.
+        loss = sum([loss_terms[k] * self.config.loss_weights[k] for k in loss_terms])
+        assert isinstance(loss, Tensor)
+        assert loss.shape == ()
+        log_outputs["train_loss"] = loss
+
+        return loss, log_outputs
 
     def compute_denoising_loss(
         self,

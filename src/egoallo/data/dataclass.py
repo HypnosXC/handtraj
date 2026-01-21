@@ -25,15 +25,6 @@ class HandTrainingData(TensorDataclass):
 
     rgb_frames: Float[Tensor, "*#batch timesteps h w 3"]
 
-    # @property
-    # def joints_wrt_world(self) -> Tensor:
-    #     return tf.SE3(self.T_world_cpf[..., None, :]) @ self.joints_wrt_cpf
-    
-    # joints_wrt_cpf: Float[Tensor, "*#batch timesteps 21 3"]
-    # """Joint positions relative to the central pupil frame."""
-
-    # mask: Bool[Tensor, "*#batch timesteps"]
-    # """Mask to support variable-length sequence."""
     intrinsics: Float[Tensor, "*#batch 4"]
     """Camera intrinsics: fx, fy, ppx, ppy."""
 
@@ -42,9 +33,13 @@ class HandTrainingData(TensorDataclass):
 
     # hand_quats: Float[Tensor, "*#batch timesteps 30 4"] | None
     # """Local orientations for each hand joint."""
+    mask: Bool[Tensor, "*#batch timesteps"]
+    """Mask to support variable-length sequence."""
+    
+    mano_side: Float[Tensor, "*#batch 1"]
+    """Side of the hand, either 0->'left' or 1->'right'."""
 
-    mano_side: str
-    """Side of the hand, either 'left' or 'right'."""
+    img_feature: Float[Tensor, "*#batch timesteps 1280"]
 
 
 class EgoTrainingData(TensorDataclass):
@@ -161,6 +156,10 @@ class EgoTrainingData(TensorDataclass):
 def collate_dataclass[T](batch: list[T]) -> T:
     """Collate function that works for dataclasses."""
     keys = vars(batch[0]).keys()
+    for k in keys:
+        for b in batch:
+            if getattr(b, k).device != batch[0].mano_betas.device:
+                print("wrong device for:", k, " ",getattr(b, k).device)
     return type(batch[0])(
         **{k: torch.stack([getattr(b, k) for b in batch]) for k in keys}
     )
