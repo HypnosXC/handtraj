@@ -858,7 +858,13 @@ def cal_variance(joints_list):
     stacked_joint_mean = torch.mean(stacked_joints.reshape(num_joints,-1), dim=-1)  # [J,3*B*T]
     variance = stacked_joints_var.mean(dim=1)  # [J]
     return variance,stacked_joint_mean
+    data #[N,T,J,3]
+    data_t = data[:,t,:,:] #[N,J,3]
+    mask = torch.any(data_t != 0, dim=(0, 2))  # shape: (J,), bool tensor
+    filtered_data = data_t[:, mask, :]
 
+# 过滤 data
+filtered_data = data[:, mask, :]
 import numpy as np
 import matplotlib.pyplot as plt
 import torch

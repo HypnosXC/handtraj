@@ -192,7 +192,6 @@ def run_training(
     loop_metrics_gen = training_utils.loop_metric_generator(counter_init=step)
     prev_checkpoint_path: Path | None = None
     error_cnt = 0
-
     # Training loop
     while True:
         for train_batch in train_loader:
