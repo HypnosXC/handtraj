@@ -351,7 +351,7 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
             composited = np.where(render_mask[:, :, None], render_rgb, composited)
         composited = np.concatenate([image,composited], axis=1)
         if resize is not None:
-            composited = cv2.resize(composited, resize)
+            composited = cv2.resize(composited, resize) # data~[N,T,J,3],[J,N*T*3],[J,3,N*T]=mean(var(N*T))
         out.write(composited)
     out.release()
     print(f"visualization saved at : {out_dir}")
@@ -378,7 +378,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/data-share/L202500061/handtraj/experiments/stride4_arctic_fp_accelerate/v0/checkpoints_ep36600_878399")#("/data-share/L202500064/handtraj/experiments/cfg_train/v1/checkpoints_400000")
+    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/cfg_train/v1/checkpoints_400000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -436,7 +436,7 @@ def inference_and_visualize(
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
-    if seq_len > 60:
+    if seq_len > 64:
         window_size = 64
         overlap_size = 32
         canonical_overlap_weights = (
@@ -492,6 +492,7 @@ def inference_and_visualize(
                             conds=conds,
                             img_feat=cond_feat,
                             mask=None,
+                            cond_dropout_keep_mask = torch.zeros((batch,), device=device),
                         )* overlap_weights_slice
                     )
 
@@ -573,6 +574,7 @@ def inference_and_visualize(
                                                             project_output_rotmats=False,
                                                             conds=conds,
                                                             img_feat=cond_feat,
+                                                            cond_dropout_keep_mask = torch.zeros((batch,), device=device),
                                                             mask=None,
                                                         )
 
@@ -785,7 +787,7 @@ def main(args: Args) -> None:
                                     subseq_len = train_batch.mask.sum().cpu().numpy(),
                                     out_dir = "tmp/visualize_hand")
         else:
-            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0}
+            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0,"accel_score":0}
             total_size = 0
             dataloader = torch.utils.data.DataLoader(dataset, 
                                                     batch_size=256,
@@ -796,13 +798,16 @@ def main(args: Args) -> None:
                                                     drop_last=False)
             var_batch = []
             mean_batch=[]
+            gt_joints = []
             for train_batch in dataloader:
                 total_size += train_batch.mano_betas.shape[0]
                 joints_list = []
-                for i in range(10):
+                for i in range(1):
                     pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
                     _,_,joints_pred = pred.apply_to_hand()
                     joints_list.append(joints_pred) # BxTxJx3
+                    for j in range(train_batch.mano_joint_3d.shape[0]):
+                        gt_joints.append(joints_pred.to(device)[j].unsqueeze(0))
                 variance,mean = cal_variance(joints_list) 
                 var_batch.append(variance.cpu().numpy())
                 mean_batch.append(mean.cpu().numpy())
@@ -817,13 +822,17 @@ def main(args: Args) -> None:
                                                         )
                 _,_,joints_pred = pred.apply_to_hand()
                 for var in errors.keys():
-                    if var  != "3D_joints":
+                    if var  != "3D_joints" and var != "accel_score":
                         err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1)
                         if len(err.shape)>2:
                             err = err.sum(dim=-1)
                         errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy()
-                    else:#MJPE
+                    else:#MPJPE & ACCEL score
                         err = torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).cpu()
+                        accel_gt = train_batch.mano_joint_3d.to(device)[:,2:,:]-2*train_batch.mano_joint_3d.to(device)[:,1:-1,:]+train_batch.mano_joint_3d.to(device)[:,:-2,:]
+                        accel_pred = joints_pred[:,2:,:]-2*joints_pred[:,1:-1,:]+joints_pred[:,:-2,:]
+                        accel_err = torch.sqrt(((accel_gt - accel_pred)**2).sum(dim=-1)).mean(dim=-1).cpu()
+                        errors["accel_score"]+=(torch.where(loss_mask[:,1:-1].cpu(),accel_err,torch.zeros_like(accel_err)).sum(dim=-1)/loss_mask[:,1:-1].sum(dim=-1)).sum().numpy() * 1000
                         errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy() * 1000
             for var in errors.keys():
                 print("var: ",var," MSE error is:",errors[var]/total_size)
@@ -833,6 +842,9 @@ def main(args: Args) -> None:
             mean_variance = np.mean(var_batch,axis=0) # J
             final_mean = np.mean(mean_batch,axis=0) # J
             print(mean_variance)
+            mean_variance,final_mean= cal_variance(gt_joints)
+            mean_variance = mean_variance.cpu().numpy()
+            final_mean = final_mean.cpu().numpy()
             plot_joint_variance_curve( mean_variance)
             plot_joint_variance_curve(final_mean, title="Joint Mean Curve", line_color='green',name='mean')
 
@@ -846,7 +858,6 @@ def cal_variance(joints_list):
     stacked_joint_mean = torch.mean(stacked_joints.reshape(num_joints,-1), dim=-1)  # [J,3*B*T]
     variance = stacked_joints_var.mean(dim=1)  # [J]
     return variance,stacked_joint_mean
-    
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -916,7 +927,7 @@ def plot_joint_variance_curve( vars,
     
     # 在每个点上添加方差值
     for i, v in enumerate(joint_variances):
-        if v<1e6:
+        if v<1e-6:
             ax.text(i, v * 1.05, f'{v:.8f}', 
                     ha='center', fontsize=9, fontweight='bold')
         else:

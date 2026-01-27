@@ -296,7 +296,8 @@ class HandDenoiserConfig:
             prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
             cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
             # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
-            diff_motion = prior_motion.inverse() @ cur_motion 
+            # diff_motion = prior_motion.inverse() @ cur_motion 
+            diff_moiton = cur_motion.inverse() @ prior_motion
             cur_motion = cur_motion.inverse() @ cur_motion
             # print("identi mat is", cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:])
             cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
