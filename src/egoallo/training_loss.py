@@ -29,9 +29,6 @@ class TrainingLossConfig:
             "mano_betas": 0.1,
             "mano_poses": 1.0,
             "mano_poses_mat": 1.0,
-            "global_orientation": 1.0,
-            "global_ori_mat": 1.0,
-            "global_translation": 1.0,
             "mano_side": 1.0
         }.copy
     )
@@ -184,8 +181,8 @@ class TrainingLossComputer:
                 )
                 ** 2,
             ),
-            "global_ori_mat": weight_and_mask_loss((x_0_pred.global_ori_mat - x_0.global_ori_mat) ** 2),
-            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
+            #"global_ori_mat": weight_and_mask_loss((x_0_pred.global_ori_mat - x_0.global_ori_mat) ** 2),
+            #"global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
             "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
             }
         else:
@@ -203,8 +200,8 @@ class TrainingLossComputer:
                 )
                 ** 2,
             ),
-            "global_orientation": weight_and_mask_loss((x_0_pred.global_orientation - x_0.global_orientation) ** 2),
-            "global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
+            #"global_orientation": weight_and_mask_loss((x_0_pred.global_orientation - x_0.global_orientation) ** 2),
+            #"global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
             "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
             }
 

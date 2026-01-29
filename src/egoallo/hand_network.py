@@ -53,11 +53,12 @@ class HandDenoiseTraj(TensorDataclass):
         self.mano_betas=kwargs["mano_betas"]
         self.mano_poses=kwargs["mano_poses"]
         self.mano_poses_mat=SO3.exp(kwargs["mano_poses"]).as_matrix().reshape((*batch,time,15,9))
-        if kwargs.get("global_orientation_mat",None) is not None:
+        if kwargs.get("global_orientation",None) is not None:
             self.global_orientation=kwargs["global_orientation"]
             self.global_ori_mat=SO3.exp(kwargs["global_orientation"]).as_matrix().reshape((*batch,time,9))
         else:
             self.global_orientation=None
+            self.global_ori_mat=None
         if kwargs.get("global_translation",None) is not None:
             self.global_translation=kwargs["global_translation"]
         else:
@@ -478,15 +479,11 @@ class HandDenoiser(nn.Module):
             x_t_encoded = (
                 self.encoders["mano_betas"](x_t.mano_betas.reshape((batch, time, -1)))
                 + self.encoders["mano_poses_mat"](x_t.mano_poses_mat.reshape((batch, time, -1)))
-                + self.encoders["global_ori_mat"](x_t.global_ori_mat)
-                + self.encoders["global_translation"](x_t.global_translation)
             )
         else:
             x_t_encoded = (
                 self.encoders["mano_betas"](x_t.mano_betas.reshape((batch, time, -1)))
                 + self.encoders["mano_poses"](x_t.mano_poses.reshape((batch, time, -1)))
-                + self.encoders["global_orientation"](x_t.global_orientation)
-                + self.encoders["global_translation"](x_t.global_translation)
             )
         assert x_t_encoded.shape == (batch, time, config.d_latent)
 
