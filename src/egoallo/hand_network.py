@@ -53,16 +53,22 @@ class HandDenoiseTraj(TensorDataclass):
         self.mano_betas=kwargs["mano_betas"]
         self.mano_poses=kwargs["mano_poses"]
         self.mano_poses_mat=SO3.exp(kwargs["mano_poses"]).as_matrix().reshape((*batch,time,15,9))
-        self.global_orientation=kwargs["global_orientation"]
-        self.global_ori_mat=SO3.exp(kwargs["global_orientation"]).as_matrix().reshape((*batch,time,9))
-        self.global_translation=kwargs["global_translation"]
+        if kwargs.get("global_orientation_mat",None) is not None:
+            self.global_orientation=kwargs["global_orientation"]
+            self.global_ori_mat=SO3.exp(kwargs["global_orientation"]).as_matrix().reshape((*batch,time,9))
+        else:
+            self.global_orientation=None
+        if kwargs.get("global_translation",None) is not None:
+            self.global_translation=kwargs["global_translation"]
+        else:
+            self.global_translation=None
         self.mano_side=kwargs["mano_side"]
     @staticmethod
     def get_packed_dim(using_mat:bool) -> int:
         if using_mat:
-            packed_dim = 10 + 15 * 9 + 9 + 3
+            packed_dim = 10 + 15 * 9# + 9 + 3
         else:
-            packed_dim = 10 + 15 * 3 + 3 + 3
+            packed_dim = 10 + 15 * 3# + 3 + 3
         return packed_dim
 
     def apply_to_hand(self,) -> tuple[torch.Tensor, torch.Tensor]:
@@ -120,7 +126,7 @@ class HandDenoiseTraj(TensorDataclass):
             [
                 value_list[x].reshape((*batch, time, -1))
                 for x in value_list.keys()
-                if x not in ["mano_poses","global_orientation","mano_side"]
+                if x not in ["mano_poses","global_orientation","mano_side","global_translation","global_ori_mat"]
             ],
             dim=-1,
             )
@@ -129,7 +135,7 @@ class HandDenoiseTraj(TensorDataclass):
             [
                 value_list[x].reshape((*batch, time, -1))
                 for x in value_list.keys()
-                if x not in ["mano_poses_mat","global_ori_mat","mano_side"]
+                if x not in ["mano_poses_mat","global_orientation","global_translation","global_ori_mat","mano_side"]
             ],
             dim=-1,
             )
@@ -153,20 +159,17 @@ class HandDenoiseTraj(TensorDataclass):
         (*batch, time, d_state) = x.shape
         assert d_state == cls.get_packed_dim(using_mat)
         if using_mat:
-            mano_betas, mano_poses_mat, global_ori_mat,global_translation = torch.split(
-                x, [10, 15 * 9, 9, 3], dim=-1
+            mano_betas, mano_poses_mat = torch.split(
+                x, [10, 15 * 9], dim=-1
             )
             mano_poses_mat = mano_poses_mat.reshape((*batch, time, 15, 9))
             mano_poses = SO3.from_matrix(mano_poses_mat.reshape((*batch, time, 15, 3, 3))).log()
-            global_orientation = SO3.from_matrix(global_ori_mat.reshape(((*batch, time, 3, 3)))).log()
         else:
-            mano_betas, mano_poses, global_orientation,global_translation = torch.split(
-                x, [10, 15 * 3, 3, 3], dim=-1
+            mano_betas, mano_poses = torch.split(
+                x, [10, 15 * 3], dim=-1
             )
             mano_poses = mano_poses.reshape((*batch, time, 15, 3))
             mano_poses_mat = SO3.exp(mano_poses).as_matrix().reshape((*batch, time, 15, 9))
-            global_ori_mat = SO3.exp(global_orientation).as_matrix().reshape((*batch, time, 9))
-        hand_rotmats = None
         assert mano_betas.shape == (*batch, time, 10)
 
         # if project_rotmats:
@@ -176,8 +179,6 @@ class HandDenoiseTraj(TensorDataclass):
         return HandDenoiseTraj(
             mano_betas=mano_betas,
             mano_poses=mano_poses,
-            global_orientation=global_orientation,
-            global_translation=global_translation,
             mano_side=mano_side
         )
 
@@ -296,8 +297,8 @@ class HandDenoiserConfig:
             prior_motion = SE3.from_rotation_and_translation(rotation=prior_orien,translation=trans[:,:-1,:])
             cur_motion = SE3.from_rotation_and_translation(rotation=cur_orien,translation=trans[:,1:,:])
             # id_motion = SE3.identity(device=conds.device,dtype=trans.dtype).squeeze(0).squeeze(0).expand(batch,1,wrist_motion.shape[-1])
-            # diff_motion = prior_motion.inverse() @ cur_motion 
-            diff_moiton = cur_motion.inverse() @ prior_motion
+            diff_motion = prior_motion.inverse() @ cur_motion 
+            # diff_motion =   prior_motion @ cur_motion.inverse()
             cur_motion = cur_motion.inverse() @ cur_motion
             # print("identi mat is", cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:])
             cond = torch.cat((cur_motion.as_matrix()[..., :3, :].reshape((batch, time -1 , 12))[:,:1,:],
@@ -329,15 +330,15 @@ class HandDenoiser(nn.Module):
             modality_dims: dict[str, int] = {
                 "mano_betas": 10,
                 "mano_poses_mat": 15 * 9,
-                "global_ori_mat": 9,
-                "global_translation":3,
+                #"global_ori_mat": 9,
+                #"global_translation":3,
             }
         else:
             modality_dims: dict[str, int] = {
                 "mano_betas": 10,
                 "mano_poses": 15 * 3,
-                "global_orientation": 3,
-                "global_translation":3,
+                #"global_orientation": 3,
+                #"global_translation":3,
             }
         print("model dim is",sum(modality_dims.values()), "and traj dim is", self.get_d_state())
         assert sum(modality_dims.values()) == self.get_d_state()

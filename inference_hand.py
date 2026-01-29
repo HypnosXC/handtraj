@@ -492,7 +492,7 @@ def inference_and_visualize(
                             conds=conds,
                             img_feat=cond_feat,
                             mask=None,
-                            cond_dropout_keep_mask = torch.zeros((batch,), device=device),
+                            cond_dropout_keep_mask = torch.ones((batch,), device=device),
                         )* overlap_weights_slice
                     )
 
@@ -574,7 +574,7 @@ def inference_and_visualize(
                                                             project_output_rotmats=False,
                                                             conds=conds,
                                                             img_feat=cond_feat,
-                                                            cond_dropout_keep_mask = torch.zeros((batch,), device=device),
+                                                            cond_dropout_keep_mask = torch.ones((batch,), device=device),
                                                             mask=None,
                                                         )
 
@@ -864,7 +864,7 @@ def cal_variance(joints_list):
     filtered_data = data_t[:, mask, :]
 
 # 过滤 data
-filtered_data = data[:, mask, :]
+# filtered_data = data[:, mask, :]
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
