@@ -3,6 +3,8 @@
 *.pyc
 *.err
 *.out
+*.png
+*.mp4
 experiments/
 *.egg-info
 *.ipynb_checkpoints
