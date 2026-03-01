@@ -39,7 +39,7 @@ class HandTrainingData(TensorDataclass):
     mano_side: Float[Tensor, "*#batch 1"]
     """Side of the hand, either 0->'left' or 1->'right'."""
 
-    img_feature: Float[Tensor, "*#batch timesteps 1280"]
+    img_feature: Float[Tensor, "*#batch timesteps 768 16 16"]
 
 
 class EgoTrainingData(TensorDataclass):
