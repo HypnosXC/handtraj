@@ -218,7 +218,9 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             assert speed_augment is None or speed_augment == (1.0, 1.0), "use_feature should be None if speed_augment is not (1.0, 1.0)"
             assert flip_augment is False, "use_feature should be None if flip_augment is True"
         assert flip_augment is False, "flip_augment is not supported yet"
-        data_root = "/public/home/annie/preprocessed"
+        # data_root = "/public/home/annie/preprocessed"
+        data_root = "/data/lingang_data/data1/handdata/"
+        feat_root = "/public/home/annie/preprocessed/dino_feats"
         if dataset_name=="dexycb":
             self._hdf5_path = os.path.join(data_root, "dexycb_v6.hdf5")
             self.video_root = os.path.join(data_root, "dexycb/videos_v4")
@@ -239,7 +241,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
 
-        self._feature_hdf5 = os.path.join(data_root, "dino_feats", f"{self.dataset_name}_{self.split}_dino_fpn.hdf5")
+        self._feature_hdf5 = os.path.join(feat_root, f"{self.dataset_name}_{self.split}_dino_fpn.hdf5")
           
         # self.img_feat_root = os.path.join(img_feat_root[dataset_name], split)
         self.dataset_name = dataset_name
