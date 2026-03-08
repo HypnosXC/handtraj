@@ -1,2 +1,1 @@
-source /root/miniconda3/bin/activate handgen
-accelerate launch --num_processes 8 --num_machines 1 train_hand_motion_prior.py --config.experiment-name cfg_train --config.batch_size 1024
+accelerate launch --num_processes 8 --num_machines 1 train_hand_motion_prior.py --config.experiment-name 2d_decoder --config.batch_size 256

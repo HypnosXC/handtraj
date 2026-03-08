@@ -12,6 +12,7 @@ from loguru import logger
 from rotary_embedding_torch import RotaryEmbedding
 from torch import Tensor, nn
 from manopth.manolayer import ManoLayer
+from .hand2d_net import Pose2DTransformerDecoder
 from .tensor_dataclass import TensorDataclass
 from .transforms import SE3, SO3
 mano_side_str=['left','right']
@@ -82,14 +83,14 @@ class HandDenoiseTraj(TensorDataclass):
                             use_pca = False,
                             ncomps=45,
                             side="left",
-                            mano_root='/data-share/share-folder/handdata/mano',
+                            mano_root='/data/xuchen',
                         ).to(self.mano_poses.device)
         right_mano_layer = ManoLayer(
                             flat_hand_mean=True,
                             use_pca = False,
                             ncomps=45,
                             side="right",
-                            mano_root='/data-share/share-folder/handdata/mano',
+                            mano_root='/data/xuchen',
                         ).to(self.mano_poses.device)
         vertices=[]
         joints=[]
@@ -195,8 +196,17 @@ class HandDenoiserConfig:
     encoder_layers: int = 6
     decoder_layers: int = 6
     dropout_p: float = 0.2
+    pose2d_patch_feat_channels: int = 768
+    pose2d_latent_channels: int = 8
+    pose2d_d_latent: int = 256
+    pose2d_num_joints: int = 21
+    pose2d_num_layers: int = 4
+    pose2d_num_heads: int = 8
+    pose2d_d_feedforward: int = 1024
+    pose2d_global_feat_dim: int = 128
     using_mat: bool = True
-    using_img_feat: bool = False
+    using_img_feat: bool = True
+    predict_2Dpose: bool = True
     in_context_learning: bool = False
     activation: Literal["gelu", "relu"] = "gelu"
 
@@ -211,7 +221,7 @@ class HandDenoiserConfig:
 
     cond_param: Literal[
         "ours", "all", "wrist_motion","differential","canonicalized", "absolute", "absrel", "absrel_global_deltas"
-    ] = "differential"
+    ] = "only_side"
     """Which conditioning parameterization to use.
 
     "ours" is the default, we try to be clever and design something with nice
@@ -225,11 +235,13 @@ class HandDenoiserConfig:
     @cached_property
     def d_cond(self) -> int:
         """Dimensionality of conditioning vector."""
-
+        print("cond type is", self.cond_param)
         if self.cond_param == "all":
             d_cond = 0
             d_cond += 0 ## root position
             d_cond += 62 ## all info
+        elif self.cond_param == 'only_side':
+            d_cond = 1
         elif self.cond_param == "ours":
             d_cond = 0
             d_cond += 3 ## root position
@@ -274,6 +286,8 @@ class HandDenoiserConfig:
         # Construct device pose conditioning.
         if self.cond_param == "all":
             cond = conds.pack()
+        elif self.cond_param == "only_side":
+            cond = conds.mano_side
         elif self.cond_param == "ours":
             cond = rel_palm_pose
             diff_cond = torch.zeros_like(cond)
@@ -325,7 +339,25 @@ class HandDenoiser(nn.Module):
         self.config = config
         Activation = {"gelu": nn.GELU, "relu": nn.ReLU}[config.activation]
         if config.using_img_feat:
-            self.img_enc = nn.Linear(1280,128)
+            if config.predict_2Dpose == False:
+                self.img_enc = nn.Linear(768,128)
+            else:
+                self.pose2d_decoder = Pose2DTransformerDecoder(
+                patch_feat_channels=config.pose2d_patch_feat_channels,
+                latent_channels=config.pose2d_latent_channels,
+                d_latent=config.pose2d_d_latent,
+                num_joints=config.pose2d_num_joints,
+                num_layers=config.pose2d_num_layers,
+                num_heads=config.pose2d_num_heads,
+                d_feedforward=config.pose2d_d_feedforward,
+                dropout_p=config.dropout_p,
+                global_feat_dim=config.pose2d_global_feat_dim,
+                activation=config.activation,
+                )
+                # self.pose2d_feat_proj = nn.Linear(
+                #     config.pose2d_num_joints * config.pose2d_d_latent,
+                #     config.pose2d_num_joints * config.pose2d_d_latent,
+                # )
         # MLP encoders and decoders for each modality we want to denoise.
         if config.using_mat:
             modality_dims: dict[str, int] = {
@@ -497,8 +529,19 @@ class HandDenoiser(nn.Module):
             rel_palm_pose = rel_palm_pose,
             conds = conds
         )
+        # pose_2d = None
+        # pose_2d_conf = None
+        # joint_feat_flat = None
+        global_img_feat = None
         if config.using_img_feat:
-            cond = torch.cat((cond,self.img_enc(img_feat)),dim=-1)
+            if config.predict_2Dpose:
+                # pose_2d, pose_2d_conf, joint_feat,
+                global_img_feat = (
+                self.pose2d_decoder(img_feat.float())
+                )
+                cond = torch.cat((cond,global_img_feat),dim=-1)
+            else:
+                cond = torch.cat((cond,self.img_enc(img_feat.float())),dim=-1)
         # Randomly drop out conditioning information; this serves as a
         # regularizer that aims to improve sample diversity.
         if cond_dropout_keep_mask is not None:
@@ -742,13 +785,9 @@ class TransformerBlock(nn.Module):
         )
         x = self.dropout(x)
         x = rearrange(x, "b nh t dh -> b t (nh dh)", nh=config.n_heads)
-        x = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, dropout_p=config.dropout_p
-        )
-        x = self.dropout(x)
-        x = rearrange(x, "b nh t dh -> b t (nh dh)", nh=config.n_heads)
         x = self.sattn_out_proj(x)
         return x
+    
 
     def _xattn(self, x: Tensor, attn_mask: Tensor | None, cond: Tensor) -> Tensor:
         """Multi-head cross-attention."""

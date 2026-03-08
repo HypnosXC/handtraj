@@ -378,7 +378,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/data-share/L202500064/handtraj/experiments/cfg_train/v1/checkpoints_400000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
+    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/cfg_train/v12/checkpoints_1300000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0

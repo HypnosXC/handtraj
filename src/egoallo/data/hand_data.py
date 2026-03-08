@@ -202,7 +202,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         min_len: int = 32,
         speed_augment = None, # (0.9, 1.0)
         flip_augment = False,
-        use_feature = "visual_token" # None, "Visual_token", "cls_token"
+        use_feature = "visual_token" # None, "visual_token", "cls_token"
     ) -> None:
         if speed_augment is not None:
             assert isinstance(speed_augment, tuple) and len(speed_augment) == 2, "speed_augment should be a tuple of (min_speed, max_speed)"
@@ -220,7 +220,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         assert flip_augment is False, "flip_augment is not supported yet"
         # data_root = "/public/home/annie/preprocessed"
         data_root = "/data/lingang_data/data1/handdata/"
-        feat_root = "/public/home/annie/preprocessed/dino_feats"
+        feat_root = "/data/annie/dino_feats"
         if dataset_name=="dexycb":
             self._hdf5_path = os.path.join(data_root, "dexycb_v6.hdf5")
             self.video_root = os.path.join(data_root, "dexycb/videos_v4")
@@ -280,20 +280,20 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             flat_hand_mean=True,
             ncomps=45,
             side='left',
-            mano_root="/public/home/annie/mano_models",
+            mano_root="/data/xuchen",
         )
         self.right_mano_layer = ManoLayer(
             use_pca=False,
             flat_hand_mean=True,
             ncomps=45,
             side='right',
-            mano_root="/public/home/annie/mano_models",
+            mano_root="/data/xuchen",
         )
         self.archive: h5py.File | None = None
-        if use_feature is not None:
-            self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
-        
+        self.use_feature = use_feature
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
+        if self.use_feature is not None:
+            self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
         if self.archive is None:
             self.archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         kwargs: dict[str, Any] = {}
@@ -454,7 +454,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 if pad_len > 0:
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
         elif self.use_token == "visual_token":
-            assert self.feature_archive[group_name]["layer_11"].shape[0] == dataset['mano_poses'].shape[0], f"Feature length mismatch: {self.feature_archive[group_name]['layer_11'].shape[0]} vs {dataset['mano_poses'].shape[0]}"
+            assert self.feature_archive[group_name]["layer_11"].shape[0] <= dataset['mano_poses'].shape[0], f"Feature length mismatch: {self.feature_archive[group_name]['layer_11'].shape[0]} vs {dataset['mano_poses'].shape[0]}"
             kwargs['img_feature'] = torch.from_numpy(self.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len]) # T,768,16,16
             if self._subseq_len != -1:
                 if pad_len > 0:
@@ -706,7 +706,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
                  min_len:int=32,
                  speed_augment = None,
                  flip_augment = False,
-                 use_feature = "visual_token" # None, "Visual_token", "cls_token"
+                 use_feature = "visual_token" # None, "visual_token", "cls_token"
                  ) -> None:
         if dataset_name == "all":
             dataset_ih26 = HandHdf5EachDataset(split=split, dataset_name="interhand26m", vis=vis, subseq_len=subseq_len, clip_stride=clip_stride,min_len=min_len, speed_augment=speed_augment, flip_augment=flip_augment, use_feature=use_feature)

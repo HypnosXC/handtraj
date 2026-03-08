@@ -9,7 +9,8 @@ import torch.optim.lr_scheduler
 import torch.utils.data
 import tyro
 import yaml
-from accelerate import Accelerator, DataLoaderConfiguration
+from accelerate import Accelerator, DataLoaderConfiguration, DistributedDataParallelKwargs
+
 from accelerate.utils import ProjectConfiguration, set_seed
 from loguru import logger
 
@@ -69,7 +70,9 @@ def run_training(
     restore_checkpoint_dir: Path | None = None,
 ) -> None:
     torch.multiprocessing.set_start_method('spawn')
+
     # Initialize Accelerator for multi-GPU support
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         project_config=ProjectConfiguration(
             project_dir=str(get_experiment_dir(config.experiment_name)),
@@ -79,6 +82,7 @@ def run_training(
             split_batches=True,
             use_seedable_sampler=True
         ),
+        kwargs_handlers=[ddp_kwargs],
         mixed_precision="fp16",  # Enable mixed precision for better performance
     )
     
@@ -133,6 +137,7 @@ def run_training(
         # cache_files=True,
         # slice_strategy=config.dataset_slice_strategy,
         dataset_name=datasetname,
+        use_feature= "visual_token",#"visual_token,cls_token"
         # vis=True
         # min_len=32,
         # clip_stride=16,
@@ -141,14 +146,12 @@ def run_training(
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
-        shuffle=False,
+        shuffle=True,  # Accelerate will replace this with a distributed sampler
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
         pin_memory=True,
         collate_fn=collate_dataclass,
         drop_last=True,
-        # Use DistributedSampler for multi-GPU
-        sampler=torch.utils.data.distributed.DistributedSampler(train_dataset) if accelerator.num_processes > 1 else None,
     )
 
     # Setup optimizer and scheduler
