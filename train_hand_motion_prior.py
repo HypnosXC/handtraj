@@ -72,7 +72,7 @@ def run_training(
     torch.multiprocessing.set_start_method('spawn')
 
     # Initialize Accelerator for multi-GPU support
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         project_config=ProjectConfiguration(
             project_dir=str(get_experiment_dir(config.experiment_name)),
@@ -82,7 +82,6 @@ def run_training(
             split_batches=True,
             use_seedable_sampler=True
         ),
-        kwargs_handlers=[ddp_kwargs],
         mixed_precision="fp16",  # Enable mixed precision for better performance
     )
     
@@ -133,7 +132,7 @@ def run_training(
         # config.dataset_hdf5_path,
         # config.dataset_files_path,
         # splits=config.train_splits,
-        # subseq_len=config.subseq_len,
+        subseq_len=config.subseq_len,
         # cache_files=True,
         # slice_strategy=config.dataset_slice_strategy,
         dataset_name=datasetname,

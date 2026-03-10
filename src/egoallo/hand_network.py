@@ -273,6 +273,8 @@ class HandDenoiserConfig:
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
         if self.using_img_feat:
             d_cond += 128 ## compress img_feat to 128
+            if self.predict_2Dpose:
+                d_cond += self.pose2d_global_feat_dim
         return d_cond
 
     def make_cond(
@@ -354,10 +356,10 @@ class HandDenoiser(nn.Module):
                 global_feat_dim=config.pose2d_global_feat_dim,
                 activation=config.activation,
                 )
-                # self.pose2d_feat_proj = nn.Linear(
-                #     config.pose2d_num_joints * config.pose2d_d_latent,
-                #     config.pose2d_num_joints * config.pose2d_d_latent,
-                # )
+                self.pose2d_feat_proj = nn.Linear(
+                    config.pose2d_num_joints * config.pose2d_d_latent,
+                    config.pose2d_global_feat_dim,
+                )
         # MLP encoders and decoders for each modality we want to denoise.
         if config.using_mat:
             modality_dims: dict[str, int] = {
@@ -529,17 +531,18 @@ class HandDenoiser(nn.Module):
             rel_palm_pose = rel_palm_pose,
             conds = conds
         )
-        # pose_2d = None
-        # pose_2d_conf = None
-        # joint_feat_flat = None
+        pose_2d = None
+        pose_2d_conf = None
+        joint_feat_flat = None
         global_img_feat = None
         if config.using_img_feat:
             if config.predict_2Dpose:
                 # pose_2d, pose_2d_conf, joint_feat,
-                global_img_feat = (
-                self.pose2d_decoder(img_feat.float())
-                )
-                cond = torch.cat((cond,global_img_feat),dim=-1)
+                pose_2d, confidence, joint_feat, global_img_feat = ( self.pose2d_decoder(img_feat.float())
+                                                                 )
+                flat_joint_feat = joint_feat.reshape(batch, time, -1)
+                joint_feat_flat = self.pose2d_feat_proj(flat_joint_feat)
+                cond = torch.cat((cond,global_img_feat,joint_feat_flat),dim=-1)
             else:
                 cond = torch.cat((cond,self.img_enc(img_feat.float())),dim=-1)
         # Randomly drop out conditioning information; this serves as a
@@ -560,7 +563,6 @@ class HandDenoiser(nn.Module):
             assert pos_enc.shape == (1, time, config.d_latent)
         else:
             assert_never(config.positional_encoding)
-
         encoder_out = self.latent_from_cond(cond) + pos_enc
         decoder_out = x_t_encoded + pos_enc
 
@@ -631,7 +633,7 @@ class HandDenoiser(nn.Module):
         assert packed_output.shape == (batch, time, self.get_d_state())
 
         # Return packed output.
-        return packed_output
+        return packed_output,pose_2d,confidence
 
 
 @cache

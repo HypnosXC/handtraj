@@ -100,11 +100,10 @@ class LatentCNNEncoder(nn.Module):
 
         global_feat = self.global_pool(feat).squeeze(-1).squeeze(-1)  # (B*T, d_out)
         global_feat = self.global_proj(global_feat)                   # (B*T, global_feat_dim)
-        return global_feat
-        # tokens = feat.flatten(2).transpose(1, 2)      # (B*T, 64, d_out)
-        # tokens = tokens + self.spatial_pos_embed
+        tokens = feat.flatten(2).transpose(1, 2)      # (B*T, 64, d_out)
+        tokens = tokens + self.spatial_pos_embed
 
-        # return tokens, global_feat
+        return tokens, global_feat
 
 
 class Pose2DTransformerDecoder(nn.Module):
@@ -135,67 +134,65 @@ class Pose2DTransformerDecoder(nn.Module):
             activation=activation,
         )
 
-        # self.joint_queries = nn.Parameter(
-        #     torch.randn(1, num_joints, d_latent) * 0.02
-        # )
+        self.joint_queries = nn.Parameter(
+            torch.randn(1, num_joints, d_latent) * 0.02
+        )
 
-        # Activation = nn.GELU if activation == "gelu" else nn.ReLU
-        # decoder_layer = nn.TransformerDecoderLayer(
-        #     d_model=d_latent,
-        #     nhead=num_heads,
-        #     dim_feedforward=d_feedforward,
-        #     dropout=dropout_p,
-        #     activation=(nn.functional.gelu if activation == "gelu" else nn.functional.relu),
-        #     batch_first=True,
-        #     norm_first=True,
-        # )
-        # self.layers = nn.ModuleList(
-        #     [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
-        # )
-        # self.final_norm = nn.LayerNorm(d_latent)
+        Activation = nn.GELU if activation == "gelu" else nn.ReLU
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_latent,
+            nhead=num_heads,
+            dim_feedforward=d_feedforward,
+            dropout=dropout_p,
+            activation=(nn.functional.gelu if activation == "gelu" else nn.functional.relu),
+            batch_first=True,
+            norm_first=True,
+        )
+        self.layers = nn.ModuleList(
+            [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
+        )
+        self.final_norm = nn.LayerNorm(d_latent)
 
-        # self.pose_head = nn.Sequential(
-        #     nn.Linear(d_latent, d_latent),
-        #     Activation(),
-        #     nn.Linear(d_latent, 2),
-        # )
-        # self.confidence_head = nn.Sequential(
-        #     nn.Linear(d_latent, d_latent),
-        #     Activation(),
-        #     nn.Linear(d_latent, 1),
-        #     nn.Sigmoid(),
-        # )
+        self.pose_head = nn.Sequential(
+            nn.Linear(d_latent, d_latent),
+            Activation(),
+            nn.Linear(d_latent, 2),
+        )
+        self.confidence_head = nn.Sequential(
+            nn.Linear(d_latent, d_latent),
+            Activation(),
+            nn.Linear(d_latent, 1),
+            nn.Sigmoid(),
+        )
 
     def forward(
         self,
         img_patch_feat: Float[Tensor, "batch time 768 16 16"],
-    ) -> Float[Tensor, "batch time global_feat_dim"]:
-    # ) -> tuple[
-    #     Float[Tensor, "batch time num_joints 2"],
-    #     Float[Tensor, "batch time num_joints 1"],
-    #     Float[Tensor, "batch time num_joints d_latent"],
-    #     Float[Tensor, "batch time global_feat_dim"],
-    # ]:
+    ) -> tuple[
+        Float[Tensor, "batch time num_joints 2"],
+        Float[Tensor, "batch time num_joints 1"],
+        Float[Tensor, "batch time num_joints d_latent"],
+        Float[Tensor, "batch time global_feat_dim"],
+    ]:
         batch, time = img_patch_feat.shape[:2]
         x = img_patch_feat.reshape(batch * time, *img_patch_feat.shape[2:])
 
-        global_feat = self.latent_cnn(x)
+        tokens, global_feat = self.latent_cnn(x)
         # tokens: (B*T, 64, d_latent),  global_feat: (B*T, global_feat_dim)
         global_feat = global_feat.reshape(batch, time, self.global_feat_dim)
-        return global_feat
-        # queries = self.joint_queries.expand(batch * time, -1, -1)
+        queries = self.joint_queries.expand(batch * time, -1, -1)
 
-        # for layer in self.layers:
-        #     queries = layer(queries, tokens)
+        for layer in self.layers:
+            queries = layer(queries, tokens)
 
-        # queries = self.final_norm(queries)
+        queries = self.final_norm(queries)
 
-        # pose_2d = self.pose_head(queries)
-        # confidence = self.confidence_head(queries)
+        pose_2d = self.pose_head(queries)
+        confidence = self.confidence_head(queries)
 
-        # pose_2d = pose_2d.reshape(batch, time, self.num_joints, 2)
-        # confidence = confidence.reshape(batch, time, self.num_joints, 1)
-        # joint_feat = queries.reshape(batch, time, self.num_joints, self.d_latent)
+        pose_2d = pose_2d.reshape(batch, time, self.num_joints, 2)
+        confidence = confidence.reshape(batch, time, self.num_joints, 1)
+        joint_feat = queries.reshape(batch, time, self.num_joints, self.d_latent)
         
 
-        # return pose_2d, confidence, joint_feat, global_feat
+        return pose_2d, confidence, joint_feat, global_feat

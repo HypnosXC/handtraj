@@ -29,7 +29,11 @@ class TrainingLossConfig:
             "mano_betas": 0.1,
             "mano_poses": 1.0,
             "mano_poses_mat": 1.0,
-            "mano_side": 1.0
+            "mano_side": 1.0,
+            "global_ori_mat": 1.0,
+            "global_translation": 1.0,
+            "joint_2d": 1.0,
+            "joint_2d_conf": 1.0,
         }.copy
     )
     weight_loss_by_t: Literal["emulate_eps_pred"] = "emulate_eps_pred"
@@ -123,7 +127,7 @@ class TrainingLossComputer:
         #               mask_half  * x_t_pack_half + 
         #               mask_full  * x_t_packed_full)
         # # Denoise.
-        x_0_packed_pred = model.forward(
+        x_0_packed_pred, pose_2d, confidence = model.forward(
             x_t_packed=x_t_packed,
             t=t,
             rel_palm_pose=rel_palm_pose,
@@ -136,6 +140,7 @@ class TrainingLossComputer:
             conds = x_0,
             img_feat = cond_feat
         )
+        joint_2d_conf = torch.ones_like(confidence)
         assert isinstance(x_0_packed_pred, torch.Tensor)
         x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0.mano_side)
 
@@ -184,6 +189,8 @@ class TrainingLossComputer:
             #"global_ori_mat": weight_and_mask_loss((x_0_pred.global_ori_mat - x_0.global_ori_mat) ** 2),
             #"global_translation": weight_and_mask_loss((x_0_pred.global_translation - x_0.global_translation) ** 2),
             "mano_side": weight_and_mask_loss((x_0_pred.mano_side - x_0.mano_side) ** 2),
+            "joint_2d": weight_and_mask_loss(((pose_2d - train_batch.joint_2d).reshape((batch, time, 21 * 2 ))) ** 2),
+            "joint_2d_conf": weight_and_mask_loss(((confidence - joint_2d_conf).reshape((batch, time, 21 ))) ** 2),
             }
         else:
             loss_terms: dict[str, Tensor | float] = {

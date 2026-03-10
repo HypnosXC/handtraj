@@ -202,7 +202,7 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     if resize is not None:
         width, height = resize
     else:
-        width = img_width * 2
+        width = img_width * 3
         height = img_height
     # 确定视频编码器
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
@@ -210,33 +210,6 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
     # 创建视频写入对象
     out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
     print("start making the video")
-    # for i in range(subseq_len):
-    #     image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8),cv2.COLOR_RGB2BGR)
-    #     composited =  image
-    #     for j in range(len(Trajs)):
-    #         vertices=vertices_list[j]
-    #         faces = faces_list[j]
-    #         if len(intrinsics.shape)==2:
-    #             render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-    #                                                                 intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
-    #         else:
-    #             render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-    #                                                                 intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
-    #         # breakpoint()
-    #         border_width = 10
-    #         composited_tmp = np.where(
-    #             binary_dilation(
-    #                 render_mask, np.ones((border_width, border_width), dtype=bool)
-    #             )[:, :, None],
-    #             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-    #             image,
-    #         )
-    #         composited_tmp = np.where(render_mask[:, :, None], render_rgb, image)
-    #         composited = np.concatenate([composited,composited_tmp], axis=1)
-    #     if resize is not None:
-    #         composited = cv2.resize(composited, resize)
-    #     out.write(composited)
-    # out.release()import trimesh
 
 
     # Main code with improvements: Use textured render, handle empty cases better
@@ -305,17 +278,6 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
         # Simple lines
         for p in range(1, len(traj_points)):
             cv2.line(out_image, traj_points[p-1], traj_points[p], traj_color, traj_thickness)
-        
-        # Optional: Smooth spline
-        # if len(traj_points) >= 4:
-        #     x, y = zip(*traj_points)
-        #     tck, u = splprep([x, y], s=0)
-        #     new_points = splev(np.linspace(0, 1, 100), tck)
-        #     for p in range(1, len(new_points[0])):
-        #         pt1 = (int(new_points[0][p-1]), int(new_points[1][p-1]))
-        #         pt2 = (int(new_points[0][p]), int(new_points[1][p]))
-        #         cv2.line(out_image, pt1, pt2, traj_color, traj_thickness)
-        
         if draw_points:
             for pt in traj_points:
                 cv2.circle(out_image, pt, point_radius, point_color, -1)
@@ -349,6 +311,10 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
             )
             # 叠加当前traj的渲染到composited上
             composited = np.where(render_mask[:, :, None], render_rgb, composited)
+            if j==0: # ground truth, split as a single view
+                temp_image = image.copy()
+                image = np.concatenate([image,composited], axis=1)
+                composited = temp_image
         composited = np.concatenate([image,composited], axis=1)
         if resize is not None:
             composited = cv2.resize(composited, resize) # data~[N,T,J,3],[J,N*T*3],[J,3,N*T]=mean(var(N*T))
@@ -378,7 +344,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/cfg_train/v12/checkpoints_1300000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
+    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/only_img/v1/checkpoints_200000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -649,7 +615,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=False,subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=True,use_feature="cls_token",subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -776,7 +742,7 @@ def main(args: Args) -> None:
             error_joints = (torch.where(loss_mask,error_joints,torch.zeros_like(error_joints)).sum()/loss_mask.sum()).numpy()*1000
             print("Joint error is ", error_joints)
             print("take the id",rand_id,"as the test sample")
-            pred_list = []#[x_0_packed]
+            pred_list = [x_0_packed]
             print("reach visualization here!")
             for i in range(5):
                 pred = inference_and_visualize(denoiser_network,train_batch,device,False)

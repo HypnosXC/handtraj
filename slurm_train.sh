@@ -3,7 +3,7 @@
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:8
-#SBATCH --mem=240G
+#SBATCH --mem=480G
 #SBATCH --time=72:00:00
 #SBATCH --partition=gpu
 #SBATCH --job-name=handgen
@@ -14,4 +14,4 @@
 source activate handtraj
 
 # ---- 在这里写你的命令 ----
-accelerate launch --num_processes 8 --num_machines 1 train_hand_motion_prior.py --config.experiment-name image_1616 --config.batch_size 1024
+accelerate launch --num_processes 8 --num_machines 1 train_hand_motion_prior.py --config.experiment-name image_1616_sublen_128 --config.batch_size 512 --config.subseq_len 128

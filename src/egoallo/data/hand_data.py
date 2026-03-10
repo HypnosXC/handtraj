@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 # from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
 from egoallo.data.dataclass import HandTrainingData, collate_dataclass
+from .data_util import project_3d_to_2d,normalize_2d_keypoints
 
 # from hamer.utils.mesh_renderer import create_raymond_lights
 def create_raymond_lights():
@@ -110,75 +111,6 @@ def render_joint(
     return color[..., :3], rend_depth, mask
 
 
-
-
-# from hamer_helper import HamerHelper, HandOutputsWrtCamera
-# helper = HamerHelper()
-# def composite_detections(
-#     image: np.ndarray,
-#     detections: HandOutputsWrtCamera | None,
-#     h,w,
-#     border_color: tuple[int, int, int],
-# ) -> np.ndarray:
-#     if detections is None:
-#         return image
-
-#     for index in range(detections["verts"].shape[0]):
-#         print(index)
-#         render_rgb, _, render_mask = helper.render_detection(
-#             detections, hand_index=0, h=h, w=w, focal_length=None
-#         )
-#         border_width = 15
-#         image = np.where(
-#             binary_dilation(
-#                 render_mask, np.ones((border_width, border_width), dtype=bool)
-#             )[:, :, None],
-#             np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-#             image,
-#         )
-#         image = np.where(render_mask[:, :, None], render_rgb, image)
-
-#     return image
-
-
-# def put_text(
-#     image: np.ndarray,
-#     text: str,
-#     line_number: int,
-#     color: tuple[int, int, int],
-#     font_scale: float = 10.0,
-# ) -> np.ndarray:
-#     image = image.copy()
-#     font = cv2.FONT_HERSHEY_PLAIN  # type: ignore
-#     cv2.putText(  # type: ignore
-#         image,
-#         text=text,
-#         org=(2, 1 + int(15 * font_scale * (line_number + 1))),
-#         fontFace=font,
-#         fontScale=font_scale,
-#         color=(0, 0, 0),
-#         thickness=int(font_scale),
-#         lineType=cv2.LINE_AA,  # type: ignore
-#     )
-#     cv2.putText(  # type: ignore
-#         image,
-#         text=text,
-#         org=(2, 1 + int(15 * font_scale * (line_number + 1))),
-#         fontFace=font,
-#         fontScale=font_scale,
-#         color=color,
-#         thickness=int(font_scale),
-#         lineType=cv2.LINE_AA,  # type: ignore
-#     )
-#     return image
-
-# img_feat_root = {
-#     'dexycb':'/public/datasets/handdata/dexycb/img_feats_dino',
-#     'interhand26m':'/public/datasets/handdata/interhand26m/data/img_feats_dino',
-#     'arctic':'/public/datasets/handdata/arctic/img_feats_dino',
-#     'ho3d':'/public/datasets/handdata/ho3d/img_feats_dino'
-# }
-
 class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
 
@@ -213,6 +145,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self.split = split
         self.dataset_name = dataset_name
         self.use_token = use_feature
+        self.archive: h5py.File | None = None
+        self.feature_archive: h5py.File | None = None
         assert self.use_token in [None, "visual_token", "cls_token"], "use_feature should be None, 'visual_token' or 'cls_token'"
         if self.use_token is not None:
             assert speed_augment is None or speed_augment == (1.0, 1.0), "use_feature should be None if speed_augment is not (1.0, 1.0)"
@@ -273,7 +207,6 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                         start_idx += self._clip_stride
                     # last clip
                     self._mapping.append((group_name, group_length - self._subseq_len, self._subseq_len))
-
         self.N = len(self._mapping)
         self.left_mano_layer = ManoLayer(
             use_pca=False,
@@ -289,10 +222,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             side='right',
             mano_root="/data/xuchen",
         )
-        self.archive: h5py.File | None = None
-        self.use_feature = use_feature
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
-        if self.use_feature is not None:
+        if self.use_token is not None and self.feature_archive is None:
             self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
         if self.archive is None:
             self.archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
@@ -406,6 +337,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         video_name = dataset['video_name'][()].decode('utf-8')
         if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
             print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
+        image_width = 256
+        image_height = 256
         if self.vis:
             video_path = os.path.join(self.video_root, self.split, video_name)
             reader = iio.imread(video_path)
@@ -459,6 +392,16 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             if self._subseq_len != -1:
                 if pad_len > 0:
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1], kwargs['img_feature'].shape[2], kwargs['img_feature'].shape[3]))], dim=0)
+        joints_3d = kwargs["mano_joint_3d"]   # (T, 21, 3)
+        intr = kwargs["intrinsics"]           # (T, 4)
+        mask = kwargs["mask"]                 # (T,)
+
+        mano_joint_2d = project_3d_to_2d(joints_3d, intr)  # (T, 21, 2)
+        # normalized_joint_2d = normalize_2d_keypoints(mano_joint_2d, kwargs["rgb_frames"].shape[2], kwargs["rgb_frames"].shape[1])  # (T, 21, 2)
+        normalized_joint_2d = normalize_2d_keypoints(mano_joint_2d, image_height, image_width) 
+        # 将 padded 帧的 2D joints 置零（这些帧 z=0 会产生无意义值）
+        mano_joint_2d[~mask] = 0.0
+        kwargs["joint_2d"] = normalized_joint_2d
         return HandTrainingData(**kwargs)
     
     def __len__(self) -> int:
