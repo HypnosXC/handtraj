@@ -532,7 +532,7 @@ class HandDenoiser(nn.Module):
             conds = conds
         )
         pose_2d = None
-        pose_2d_conf = None
+        confidence = None
         joint_feat_flat = None
         global_img_feat = None
         if config.using_img_feat:

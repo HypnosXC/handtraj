@@ -325,8 +325,8 @@ def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
 def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTensor, mano_side: str) -> torch.FloatTensor:
     """Convert MANO pose to joint 3D positions."""
     mano_betas = mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1)
-    assert mano_pose.shape == (64, 51), f"Expected mano_pose shape (1, 51), got {mano_pose.shape}"
-    assert mano_betas.shape == (64, 10), f"Expected mano_betas shape (1, 10), got {mano_betas.shape}"
+    #assert mano_pose.shape == (64, 51), f"Expected mano_pose shape (1, 51), got {mano_pose.shape}"
+    #assert mano_betas.shape == (64, 10), f"Expected mano_betas shape (1, 10), got {mano_betas.shape}"
     mano_layer = ManoLayer(
         ncomps=45,
         side=mano_side,
@@ -344,7 +344,7 @@ def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTe
     
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/only_img/v1/checkpoints_200000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
+    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/image_1616_sublen_128/v3/checkpoints_300000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
@@ -402,7 +402,7 @@ def inference_and_visualize(
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
-    if seq_len > 64:
+    if seq_len > 128:
         window_size = 64
         overlap_size = 32
         canonical_overlap_weights = (
@@ -449,7 +449,7 @@ def inference_and_visualize(
                                                         global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
                                                         mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
                                                         ).to(device)
-                    x_0_packed_pred[:, start_t:end_t, :] += (
+                    temp_x0,_,_ = (
                         denoiser_network.forward(
                             x_t_packed[:, start_t:end_t, :],
                             torch.tensor([t], device=device).expand((batch,)),
@@ -461,6 +461,7 @@ def inference_and_visualize(
                             cond_dropout_keep_mask = torch.ones((batch,), device=device),
                         )* overlap_weights_slice
                     )
+                    x_0_packed_pred[:, start_t:end_t, :] += temp_x0
 
                 # Take the mean for overlapping regions.
                 x_0_packed_pred /= overlap_weights
@@ -533,7 +534,7 @@ def inference_and_visualize(
                                                     global_translation=x_0_packed.global_translation,
                                                     mano_side=x_0_packed.mano_side,
                                                     ).to(device)
-                x_0_packed_pred = denoiser_network.forward(
+                x_0_packed_pred, _ ,_ = denoiser_network.forward(
                                                             x_t_packed,
                                                             torch.tensor([t], device=device).expand((batch,)),
                                                             rel_palm_pose=rel_palm_pose,
@@ -615,7 +616,7 @@ def inference_and_visualize(
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=True,use_feature="cls_token",subseq_len=64)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=True,use_feature="cls_token",subseq_len=128)#(dataset_name = 'ho3d', vis=True)# 
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
@@ -913,4 +914,4 @@ def plot_joint_variance_curve( vars,
 if __name__ == "__main__":
     import tyro
     main(tyro.cli(Args))
-
+    
