@@ -154,7 +154,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         assert flip_augment is False, "flip_augment is not supported yet"
         # data_root = "/public/home/annie/preprocessed"
         data_root = "/data/lingang_data/data1/handdata/"
-        feat_root = "/data/annie/dino_feats"
+        feat_root = "/data/annie/dino_feats/"
         if dataset_name=="dexycb":
             self._hdf5_path = os.path.join(data_root, "dexycb_v6.hdf5")
             self.video_root = os.path.join(data_root, "dexycb/videos_v4")
@@ -194,19 +194,20 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         for group_name in json_data.keys():
             group_length = json_data[group_name]
             if self._subseq_len == -1:
-                self._mapping.append((group_name, 0, group_length))
+                self._mapping.append((group_name, 0, group_length, group_length)) # group_name, start_idx, after_len, ori_len
             else:
                 if group_length < self._min_len:
                     continue
                 if group_length <= self._subseq_len:
-                    self._mapping.append((group_name, 0, group_length)) # group_name, start_idx, len
+                    self._mapping.append((group_name, 0, group_length, group_length)) # group_name, start_idx, after_len, ori_len
                 else:
                     start_idx = 0
                     while start_idx + self._subseq_len < group_length:
-                        self._mapping.append((group_name, start_idx, group_length - start_idx))
+                        self._mapping.append((group_name, start_idx, group_length - start_idx, group_length))
                         start_idx += self._clip_stride
                     # last clip
-                    self._mapping.append((group_name, group_length - self._subseq_len, self._subseq_len))
+                    self._mapping.append((group_name, group_length - self._subseq_len, self._subseq_len, group_length))
+
         self.N = len(self._mapping)
         self.left_mano_layer = ManoLayer(
             use_pca=False,
@@ -222,6 +223,9 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             side='right',
             mano_root="/data/xuchen",
         )
+        self.archive: h5py.File | None = None
+        self.feature_archive: h5py.File | None = None
+        
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         if self.use_token is not None and self.feature_archive is None:
             self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
@@ -229,7 +233,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             self.archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         kwargs: dict[str, Any] = {}
         # group_name, start_idx, clip_len = self._mapping[index]
-        group_name, start_idx, after_len = self._mapping[index]
+        group_name, start_idx, after_len, ori_len = self._mapping[index]
         if self.augment['speed'] is not None:
             speed_aug = self.augment['speed']
             speed_factor = np.random.uniform(speed_aug[0], speed_aug[1])
@@ -370,6 +374,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 kwargs["rgb_frames"] = torch.ones((clip_len), dtype=torch.uint8)
             else:
                 kwargs["rgb_frames"] = torch.ones((self._subseq_len), dtype=torch.uint8)
+                
         # load img features
         # img_feat_path = os.path.join(self.img_feat_root, f'imgfeat_{group_name}.pt')
         # assert os.path.exists(img_feat_path), f"Image feature file not found: {img_feat_path}"
@@ -387,7 +392,10 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 if pad_len > 0:
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
         elif self.use_token == "visual_token":
-            assert self.feature_archive[group_name]["layer_11"].shape[0] <= dataset['mano_poses'].shape[0], f"Feature length mismatch: {self.feature_archive[group_name]['layer_11'].shape[0]} vs {dataset['mano_poses'].shape[0]}"
+            # assert self.feature_archive[group_name]["layer_11"].shape[0] == dataset['mano_poses'].shape[0], f"Feature length mismatch: {self.feature_archive[group_name]['layer_11'].shape[0]} vs {dataset['mano_poses'].shape[0]}"
+            assert self.feature_archive[group_name]["layer_11"].shape[0] == ori_len, f"Feature length mismatch: index{i}, dataset_name{self.dataset_name}, {self.feature_archive[group_name]['layer_11'].shape[0]} vs {after_len}"
+            # if self.feature_archive[group_name]["layer_11"].shape[0] != dataset['mano_poses'].shape[0]:
+            #     breakpoint()
             kwargs['img_feature'] = torch.from_numpy(self.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len]) # T,768,16,16
             if self._subseq_len != -1:
                 if pad_len > 0:
@@ -706,7 +714,7 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     def get_mapping(self):
         mapping = []
         for ds in self.dataset.datasets:
-            mapping.extend([(ds.dataset_name,item[0], item[1], item[2]) for item in ds.get_mapping()])
+            mapping.extend([(ds.dataset_name,item[0], item[1], item[2], item[3]) for item in ds.get_mapping()])
         return mapping
 
     # def hamer_output(self,index):
@@ -725,12 +733,15 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     
 if __name__ == "__main__":    
     dataset = HandHdf5Dataset(split='train', dataset_name='all', vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature="visual_token")
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=16, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
     print("Total samples in all dataset:", len(dataset))
     for batch in tqdm(dataloader):
         pass
+
     # for i in tqdm(range(len(dataset))):
-    #     sample = dataset.__getitem__(i, resize=None)
+    #     sample = dataset.__getitem__(i)
+
+
     # demo_datas = [("ho3d", "train"), ("ho3d", "test")]
     # for dataset_name, split in demo_datas:
     #     dataset = HandHdf5Dataset(split=split, dataset_name=dataset_name, vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None)
