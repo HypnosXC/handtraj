@@ -42,6 +42,11 @@ class HandTrainingData(TensorDataclass):
 
     img_feature: Float[Tensor, "*#batch timesteps 768 16 16"]
 
+    img_shape: tuple[int, int]
+    """Height and width of the input images."""
+
+    # video_name: str
+
 
 class EgoTrainingData(TensorDataclass):
     """Dictionary of tensors we use for EgoAllo training."""

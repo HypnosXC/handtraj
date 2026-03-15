@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
 # from hamer_helper import HamerHelper
 # from .dataclass import HandTrainingData
 from egoallo.data.dataclass import HandTrainingData, collate_dataclass
-from .data_util import project_3d_to_2d,normalize_2d_keypoints
+from egoallo.data.data_util import project_3d_to_2d,normalize_2d_keypoints
 
 # from hamer.utils.mesh_renderer import create_raymond_lights
 def create_raymond_lights():
@@ -339,12 +339,13 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
             kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
         video_name = dataset['video_name'][()].decode('utf-8')
+        # kwargs['video_name'] = video_name
         if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
             print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
         image_width = 256
         image_height = 256
+        video_path = os.path.join(self.video_root, self.split, video_name)
         if self.vis:
-            video_path = os.path.join(self.video_root, self.split, video_name)
             reader = iio.imread(video_path)
             rgb_frames = []
             for i in range(start_idx, start_idx + clip_len):
@@ -410,8 +411,20 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # 将 padded 帧的 2D joints 置零（这些帧 z=0 会产生无意义值）
         mano_joint_2d[~mask] = 0.0
         kwargs["joint_2d"] = normalized_joint_2d
+        # if self.dataset_name == "arctic":
+        #     kwargs['img_shape'] = (1000,1000)
+        # elif self.dataset_name=="dexycb" or self.dataset_name=="ho3d":
+        #     kwargs['img_shape'] = (480,640)
+        # else:
+        #     kwargs['img_shape'] = (512, 344)
+        props = iio.improps(video_path, plugin="pyav") # 明确指定插件更稳定
+                
+        # imageio 的 shape 通常是 (num_frames, height, width, channels)
+        # 或者直接从 metadata 字典中获取
+        # width = metadata.get('width')
+        # height = metadata.get('height')
+        kwargs['img_shape'] = props.shape[1:3]
         return HandTrainingData(**kwargs)
-    
     def __len__(self) -> int:
         return self.N
 
@@ -732,11 +745,23 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
-    dataset = HandHdf5Dataset(split='train', dataset_name='all', vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature="visual_token")
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
-    print("Total samples in all dataset:", len(dataset))
-    for batch in tqdm(dataloader):
-        pass
+    # dataset = HandHdf5Dataset(split='train', dataset_name='all', vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature="visual_token")
+    # dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
+    # print("Total samples in all dataset:", len(dataset))
+    # for batch in tqdm(dataloader):
+    #     pass
+
+    for dataset_name in ['ho3d', 'dexycb', 'interhand26m', 'arctic']:
+    # for dataset_name in ['interhand26m']:
+        this_dataset = HandHdf5Dataset(split='train', dataset_name=dataset_name, vis=True, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature=None)
+        print(dataset_name)
+        # randomly select 20 id from len(this_dataset) and visualize
+        for i in np.random.choice(len(this_dataset), size=20, replace=False):
+            sample = this_dataset.__getitem__(i,resize=None)
+            # print(sample.video_name)
+            print(sample.img_shape)
+
+
 
     # for i in tqdm(range(len(dataset))):
     #     sample = dataset.__getitem__(i)
