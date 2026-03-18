@@ -152,9 +152,10 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             assert speed_augment is None or speed_augment == (1.0, 1.0), "use_feature should be None if speed_augment is not (1.0, 1.0)"
             assert flip_augment is False, "use_feature should be None if flip_augment is True"
         assert flip_augment is False, "flip_augment is not supported yet"
-        # data_root = "/public/home/annie/preprocessed"
-        data_root = "/data/lingang_data/data1/handdata/"
-        feat_root = "/data/annie/dino_feats/"
+        data_root = "/public/home/annie/preprocessed"
+        # data_root = "/data/lingang_data/data1/handdata/"
+        feat_root = "/public/home/annie/preprocessed/dino_feats/"
+        # feat_root = "/data/annie/dino_feats"
         if dataset_name=="dexycb":
             self._hdf5_path = os.path.join(data_root, "dexycb_v6.hdf5")
             self.video_root = os.path.join(data_root, "dexycb/videos_v4")
@@ -423,7 +424,8 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # 或者直接从 metadata 字典中获取
         # width = metadata.get('width')
         # height = metadata.get('height')
-        kwargs['img_shape'] = props.shape[1:3]
+        # kwargs['img_shape'] = props.shape[1:3]
+        kwargs['img_shape'] = torch.tensor([props.shape[1], props.shape[2]])  # (h, w)
         return HandTrainingData(**kwargs)
     def __len__(self) -> int:
         return self.N
@@ -745,21 +747,24 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     #             index -= len(ds)
     
 if __name__ == "__main__":    
-    # dataset = HandHdf5Dataset(split='train', dataset_name='all', vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature="visual_token")
-    # dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
+    start_time = time.time()
+    dataset = HandHdf5Dataset(split='train', dataset_name='ho3d', vis=False, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature="visual_token")
+    print(f"Dataset loaded in {time.time() - start_time:.2f} seconds")
+    load_start_time = time.time()
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, collate_fn=collate_dataclass)
     # print("Total samples in all dataset:", len(dataset))
-    # for batch in tqdm(dataloader):
-    #     pass
+    for batch in tqdm(dataloader):
+        pass
 
-    for dataset_name in ['ho3d', 'dexycb', 'interhand26m', 'arctic']:
-    # for dataset_name in ['interhand26m']:
-        this_dataset = HandHdf5Dataset(split='train', dataset_name=dataset_name, vis=True, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature=None)
-        print(dataset_name)
-        # randomly select 20 id from len(this_dataset) and visualize
-        for i in np.random.choice(len(this_dataset), size=20, replace=False):
-            sample = this_dataset.__getitem__(i,resize=None)
-            # print(sample.video_name)
-            print(sample.img_shape)
+    # for dataset_name in ['ho3d', 'dexycb', 'interhand26m', 'arctic']:
+    # # for dataset_name in ['interhand26m']:
+    #     this_dataset = HandHdf5Dataset(split='train', dataset_name=dataset_name, vis=True, subseq_len=64, clip_stride=64, min_len=32, speed_augment=None,use_feature=None)
+    #     print(dataset_name)
+    #     # randomly select 20 id from len(this_dataset) and visualize
+    #     for i in np.random.choice(len(this_dataset), size=20, replace=False):
+    #         sample = this_dataset.__getitem__(i,resize=None)
+    #         # print(sample.video_name)
+    #         print(sample.img_shape)
 
 
 

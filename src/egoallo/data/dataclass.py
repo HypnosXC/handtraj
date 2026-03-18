@@ -42,7 +42,8 @@ class HandTrainingData(TensorDataclass):
 
     img_feature: Float[Tensor, "*#batch timesteps 768 16 16"]
 
-    img_shape: tuple[int, int]
+    # img_shape: tuple[int, int]
+    img_shape: Float[Tensor, "*#batch 2"]
     """Height and width of the input images."""
 
     # video_name: str
