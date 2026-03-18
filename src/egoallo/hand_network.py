@@ -271,18 +271,19 @@ class HandDenoiserConfig:
         # hand conditioning.
 
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
-        self._d_cond_base = d_cond  # before img feat additions
         if self.using_img_feat:
             d_cond += 128 ## compress img_feat to 128
             if self.predict_2Dpose:
                 d_cond += self.pose2d_global_feat_dim
         return d_cond
 
-    @property
+    @cached_property
     def d_cond_base(self) -> int:
         """Cond dim from make_cond (after fourier, before img feat concat)."""
-        _ = self.d_cond  # ensure _d_cond_base is computed
-        return self._d_cond_base
+        raw = {"all": 62, "only_side": 1, "ours": 6, "wrist_motion": 13,
+               "differential": 13, "canonicalized": 12, "absolute": 12,
+               "absrel": 24, "absrel_global_deltas": 24}[self.cond_param]
+        return raw + raw * self.fourier_enc_freqs * 2
 
     def make_cond(
         self,
