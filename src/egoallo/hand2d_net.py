@@ -119,6 +119,7 @@ class Pose2DTransformerDecoder(nn.Module):
         dropout_p: float = 0.1,
         global_feat_dim: int = 128,
         activation: str = "gelu",
+        d_cond: int = 7,
     ):
         super().__init__()
         self.num_joints = num_joints
@@ -168,10 +169,18 @@ class Pose2DTransformerDecoder(nn.Module):
         # Project noisy 2D joints into query space for flow matching denoising.
         self.noisy_joint_proj = nn.Linear(2, d_latent)
 
+        # Project conditioning vector into query space.
+        self.cond_proj = nn.Sequential(
+            nn.Linear(d_cond, d_latent),
+            Activation(),
+            nn.Linear(d_latent, d_latent),
+        )
+
     def forward(
         self,
         img_patch_feat: Float[Tensor, "batch time 768 16 16"],
         noisy_joint_2d: Float[Tensor, "batch time num_joints 2"] | None = None,
+        cond: Float[Tensor, "batch_time d_cond"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch time num_joints 2"],
         Float[Tensor, "batch time num_joints 1"],
@@ -190,6 +199,12 @@ class Pose2DTransformerDecoder(nn.Module):
         if noisy_joint_2d is not None:
             noisy_flat = noisy_joint_2d.reshape(batch * time, self.num_joints, 2)
             queries = queries + self.noisy_joint_proj(noisy_flat)
+
+        # Condition on noise level / timestep embedding.
+        if cond is not None:
+            # cond: (B*T, d_cond) -> broadcast to all joints as additive bias
+            cond_bias = self.cond_proj(cond)  # (B*T, d_latent)
+            queries = queries + cond_bias[:, None, :]  # (B*T, num_joints, d_latent)
 
         for layer in self.layers:
             queries = layer(queries, tokens)

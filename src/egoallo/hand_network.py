@@ -271,11 +271,18 @@ class HandDenoiserConfig:
         # hand conditioning.
 
         d_cond = d_cond + d_cond * self.fourier_enc_freqs * 2  # Fourier encoding.
+        self._d_cond_base = d_cond  # before img feat additions
         if self.using_img_feat:
             d_cond += 128 ## compress img_feat to 128
             if self.predict_2Dpose:
                 d_cond += self.pose2d_global_feat_dim
         return d_cond
+
+    @property
+    def d_cond_base(self) -> int:
+        """Cond dim from make_cond (after fourier, before img feat concat)."""
+        _ = self.d_cond  # ensure _d_cond_base is computed
+        return self._d_cond_base
 
     def make_cond(
         self,
@@ -355,6 +362,7 @@ class HandDenoiser(nn.Module):
                 dropout_p=config.dropout_p,
                 global_feat_dim=config.pose2d_global_feat_dim,
                 activation=config.activation,
+                d_cond=config.d_cond_base,
                 )
                 self.pose2d_feat_proj = nn.Linear(
                     config.pose2d_num_joints * config.pose2d_d_latent,
@@ -538,9 +546,10 @@ class HandDenoiser(nn.Module):
         global_img_feat = None
         if config.using_img_feat:
             if config.predict_2Dpose:
-                # pose_2d, pose_2d_conf, joint_feat,
+                # Pass make_cond output as conditioning to the 2D pose decoder.
+                pose2d_cond = cond.reshape(batch * time, -1)  # (B*T, d_cond_base)
                 pose_2d, confidence, joint_feat, global_img_feat = self.pose2d_decoder(
-                    img_feat.float(), noisy_joint_2d=noisy_joint_2d
+                    img_feat.float(), noisy_joint_2d=noisy_joint_2d, cond=pose2d_cond
                 )
                 flat_joint_feat = joint_feat.reshape(batch, time, -1)
                 joint_feat_flat = self.pose2d_feat_proj(flat_joint_feat)
