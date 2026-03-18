@@ -165,9 +165,13 @@ class Pose2DTransformerDecoder(nn.Module):
             nn.Sigmoid(),
         )
 
+        # Project noisy 2D joints into query space for flow matching denoising.
+        self.noisy_joint_proj = nn.Linear(2, d_latent)
+
     def forward(
         self,
         img_patch_feat: Float[Tensor, "batch time 768 16 16"],
+        noisy_joint_2d: Float[Tensor, "batch time num_joints 2"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch time num_joints 2"],
         Float[Tensor, "batch time num_joints 1"],
@@ -181,6 +185,11 @@ class Pose2DTransformerDecoder(nn.Module):
         # tokens: (B*T, 64, d_latent),  global_feat: (B*T, global_feat_dim)
         global_feat = global_feat.reshape(batch, time, self.global_feat_dim)
         queries = self.joint_queries.expand(batch * time, -1, -1)
+
+        # In flow matching mode, condition queries on noisy 2D joints.
+        if noisy_joint_2d is not None:
+            noisy_flat = noisy_joint_2d.reshape(batch * time, self.num_joints, 2)
+            queries = queries + self.noisy_joint_proj(noisy_flat)
 
         for layer in self.layers:
             queries = layer(queries, tokens)

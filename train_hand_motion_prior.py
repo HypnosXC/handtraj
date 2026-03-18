@@ -1,3 +1,4 @@
+import argparse
 import dataclasses
 import shutil
 from pathlib import Path
@@ -38,6 +39,8 @@ class HandTrainConfig:
     ] = "random_uniform_len"
     dataset_slice_random_variable_len_proportion: float = 0.3
     """Only used if dataset_slice_strategy == 'random_variable_len'."""
+    dataset_name: str = "all"
+    use_feature: str = "visual_token"
     train_splits: tuple[Literal["train", "val", "test", "just_humaneva"], ...] = (
         "train",
         "val",
@@ -64,6 +67,30 @@ def get_experiment_dir(experiment_name: str, version: int = 0) -> Path:
         return get_experiment_dir(experiment_name, version + 1)
     else:
         return experiment_dir
+
+def load_config_from_yaml(yaml_path: str) -> HandTrainConfig:
+    """Load HandTrainConfig from a YAML file."""
+    with open(yaml_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    # Build model config
+    model_kwargs = raw.pop("model", {})
+    model_config = hand_network.HandDenoiserConfig(**model_kwargs)
+
+    # Build loss config
+    loss_kwargs = raw.pop("loss", {})
+    # Convert beta_coeff_weights list to tuple if present
+    if "beta_coeff_weights" in loss_kwargs:
+        loss_kwargs["beta_coeff_weights"] = tuple(loss_kwargs["beta_coeff_weights"])
+    loss_config = training_loss.TrainingLossConfig(**loss_kwargs)
+
+    # Build top-level config
+    # Convert train_splits list to tuple if present
+    if "train_splits" in raw:
+        raw["train_splits"] = tuple(raw["train_splits"])
+
+    return HandTrainConfig(model=model_config, loss=loss_config, **raw)
+
 
 def run_training(
     config: HandTrainConfig,
@@ -127,21 +154,12 @@ def run_training(
     # Setup model and data loader
     model = hand_network.HandDenoiser(config.model)
     model_config = model.config
-    datasetname='all'
     train_dataset = HandHdf5Dataset(
-        # config.dataset_hdf5_path,
-        # config.dataset_files_path,
-        # splits=config.train_splits,
         subseq_len=config.subseq_len,
-        # cache_files=True,
-        # slice_strategy=config.dataset_slice_strategy,
-        dataset_name=datasetname,
-        use_feature= "visual_token",#"visual_token,cls_token"
-        # vis=True
-        # min_len=32,
-        # clip_stride=16,
+        dataset_name=config.dataset_name,
+        use_feature=config.use_feature,
     )
-    print("process at dataset", datasetname)
+    print("process at dataset", config.dataset_name)
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
@@ -261,4 +279,15 @@ def run_training(
             accelerator.wait_for_everyone()
 
 if __name__ == "__main__":
-    tyro.cli(run_training)
+    # Check if --config is provided; if so, load from YAML, otherwise fall back to tyro CLI
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument("--restore_checkpoint_dir", type=str, default=None, help="Path to checkpoint dir to restore from")
+    args, remaining = parser.parse_known_args()
+
+    if args.config is not None:
+        config = load_config_from_yaml(args.config)
+        restore_dir = Path(args.restore_checkpoint_dir) if args.restore_checkpoint_dir else None
+        run_training(config, restore_checkpoint_dir=restore_dir)
+    else:
+        tyro.cli(run_training)

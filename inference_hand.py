@@ -3,36 +3,39 @@ from __future__ import annotations
 import dataclasses
 import time
 from pathlib import Path
-import open3d as o3d
+from typing import List
+
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-import viser
+import torch.utils.data
 import yaml
 import random
 import os
-#from egoallo.transforms import SE3, SO3
-from egoallo.data.aria_mps import load_point_cloud_and_find_ground
+import cv2
+import pyrender
+import trimesh
+from scipy.ndimage import binary_dilation
+from tqdm.auto import tqdm
+
 from egoallo.data.dataclass import collate_dataclass
 from egoallo.guidance_optimizer_jax import GuidanceMode
-from egoallo.hand_detection_structs import (
-    CorrespondedAriaHandWristPoseDetections,
-    CorrespondedHamerDetections,
-)
 from egoallo.sampling import CosineNoiseScheduleConstants
 from egoallo.inference_utils import load_hand_denoiser
 from egoallo.data.dataclass import HandTrainingData
-from hamer.utils.mesh_renderer import create_raymond_lights
 from egoallo.data.hand_data import HandHdf5Dataset
 from src.egoallo import network, hand_network
-# from PIL import Image
-import time    
 from manopth.manolayer import ManoLayer
-import pyrender
-import trimesh
-import cv2
-from scipy.ndimage import binary_dilation
-from tqdm.auto import tqdm
+
+try:
+    from hamer.utils.mesh_renderer import create_raymond_lights
+except ImportError:
+    create_raymond_lights = None
+
+
+# ============================================================================
+# Timestep schedules
+# ============================================================================
 
 def quadratic_ts() -> np.ndarray:
     """DDIM sampling schedule."""
@@ -42,6 +45,118 @@ def quadratic_ts() -> np.ndarray:
     x[-1] = start_step
     return x[::-1]
 
+
+def linear_ts(num_steps: int = 50) -> np.ndarray:
+    """Uniform timestep schedule for flow matching (from 1.0 to 0.0)."""
+    return np.linspace(1.0, 0.0, num_steps + 1)
+
+
+# ============================================================================
+# Procrustes alignment & PA metrics
+# ============================================================================
+
+def compute_procrustes_alignment(
+    pred: np.ndarray, gt: np.ndarray
+) -> np.ndarray:
+    """Procrustes alignment: find optimal rotation, translation, and scale
+    to align pred to gt.
+
+    Args:
+        pred: (N, 3) predicted points.
+        gt:   (N, 3) ground truth points.
+
+    Returns:
+        aligned: (N, 3) aligned prediction.
+    """
+    mu_pred = pred.mean(axis=0, keepdims=True)
+    mu_gt = gt.mean(axis=0, keepdims=True)
+    pred_c = pred - mu_pred
+    gt_c = gt - mu_gt
+
+    # Optimal rotation via SVD.
+    H = pred_c.T @ gt_c  # (3, 3)
+    U, S, Vt = np.linalg.svd(H)
+    # Correct for reflection.
+    d = np.linalg.det(Vt.T @ U.T)
+    sign_mat = np.diag([1.0, 1.0, d])
+    R = Vt.T @ sign_mat @ U.T
+
+    # Optimal scale.
+    scale = np.trace(R @ H) / np.trace(pred_c.T @ pred_c)
+
+    # Apply alignment.
+    aligned = scale * pred_c @ R.T + mu_gt
+    return aligned
+
+
+def compute_pa_mpjpe(
+    pred_joints: torch.Tensor,
+    gt_joints: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> float:
+    """Procrustes-Aligned MPJPE (mm).
+
+    Args:
+        pred_joints: (B, T, J, 3)
+        gt_joints:   (B, T, J, 3)
+        mask:        (B, T) bool, valid frames.
+
+    Returns:
+        Scalar PA-MPJPE in mm.
+    """
+    pred_np = pred_joints.detach().cpu().numpy()
+    gt_np = gt_joints.detach().cpu().numpy()
+    B, T, J, _ = pred_np.shape
+
+    errors = []
+    for b in range(B):
+        for t in range(T):
+            if mask is not None and not mask[b, t]:
+                continue
+            aligned = compute_procrustes_alignment(pred_np[b, t], gt_np[b, t])
+            err = np.sqrt(((aligned - gt_np[b, t]) ** 2).sum(axis=-1)).mean()
+            errors.append(err)
+    if len(errors) == 0:
+        return 0.0
+    return float(np.mean(errors)) * 1000  # m -> mm
+
+
+def compute_pa_mpvpe(
+    pred_verts: torch.Tensor,
+    gt_verts: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> float:
+    """Procrustes-Aligned MPVPE (mm).
+
+    Args:
+        pred_verts: (B, T, V, 3)
+        gt_verts:   (B, T, V, 3)
+        mask:       (B, T) bool, valid frames.
+
+    Returns:
+        Scalar PA-MPVPE in mm.
+    """
+    pred_np = pred_verts.detach().cpu().numpy()
+    gt_np = gt_verts.detach().cpu().numpy()
+    B, T, V, _ = pred_np.shape
+
+    errors = []
+    for b in range(B):
+        for t in range(T):
+            if mask is not None and not mask[b, t]:
+                continue
+            aligned = compute_procrustes_alignment(pred_np[b, t], gt_np[b, t])
+            err = np.sqrt(((aligned - gt_np[b, t]) ** 2).sum(axis=-1)).mean()
+            errors.append(err)
+    if len(errors) == 0:
+        return 0.0
+    return float(np.mean(errors)) * 1000  # m -> mm
+
+
+# ============================================================================
+# Rendering helpers
+# ============================================================================
+
 def render_joint(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -49,7 +164,7 @@ def render_joint(
     h: int,
     w: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-
+    """Render a hand mesh into an image using pyrender."""
     render_res = (h, w)
     renderer = pyrender.OffscreenRenderer(
         viewport_width=render_res[1], viewport_height=render_res[0], point_size=1.0
@@ -65,853 +180,846 @@ def render_joint(
     )
     scene.add(mesh, "mesh")
 
-    # camera_center = [render_res[1] / 2.0, render_res[0] / 2.0]
     camera = pyrender.IntrinsicsCamera(
-        fx= intrinsics[0],
-        fy= intrinsics[1],
-        cx= intrinsics[2],
-        cy= intrinsics[3],
-        zfar=1e12,
-        znear=0.001,
+        fx=intrinsics[0], fy=intrinsics[1],
+        cx=intrinsics[2], cy=intrinsics[3],
+        zfar=1e12, znear=0.001,
     )
+    if create_raymond_lights is not None:
+        for node in create_raymond_lights():
+            scene.add_node(node)
 
-    light_nodes = create_raymond_lights()
-    for node in light_nodes:
-        scene.add_node(node)
-
-    # Create camera node and add it to pyRender scene
     camera_pose = np.eye(4)
-    camera_pose[1:3, :] *= -1  # flip the y and z axes to match opengl
+    camera_pose[1:3, :] *= -1
     camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
     scene.add_node(camera_node)
 
-    color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)  # type: ignore
+    color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     mask = color[..., -1] > 0
     return color[..., :3], rend_depth, mask
-# Function to create a natural skin-like texture
-import numpy as np
-import open3d as o3d
-import cv2
-
-def create_skin_texture(size=(512, 512)):
-    base_color = np.array([200, 150, 130], dtype=np.uint8)  # Skin base (BGR)
-    texture = np.full((size[0], size[1], 3), base_color, dtype=np.uint8)
-    noise = np.random.normal(0, 20, size=(size[0], size[1], 3)).astype(np.int16)
-    texture = np.clip(texture + noise, 0, 255).astype(np.uint8)
-    grad_x = np.linspace(0, 1, size[1])
-    grad_y = np.linspace(0, 1, size[0])[:, None]
-    gradient = (grad_x + grad_y) / 2
-    texture = np.clip(texture * (1 - 0.2 * gradient[..., None]), 0, 255).astype(np.uint8)
-    texture = cv2.GaussianBlur(texture, (15, 15), 0)
-    return texture
-
-# Safe check for CUDA availability
-def is_cuda_available_safe():
-    try:
-        return o3d.core.cuda.device_count() > 0
-    except AttributeError:
-        return False
-
-# Improved offscreen render: Use dictionary access for attributes
-def render_joint_with_texture(vertices, faces, intrinsics, h, w, texture_image=None):
-    cuda_available = is_cuda_available_safe()
-    device = o3d.core.Device("CUDA:0") if cuda_available else o3d.core.Device("CPU:0")
-    print(f"Using device for render: {device}")  # Debug print
-    
-    # Create tensor-based TriangleMesh on device
-    mesh = o3d.t.geometry.TriangleMesh(device=device)
-    
-    # Set positions and indices using dictionary
-    mesh.vertex["positions"] = o3d.core.Tensor(vertices, dtype=o3d.core.Dtype.Float32, device=device)
-    mesh.triangle["indices"] = o3d.core.Tensor(faces, dtype=o3d.core.Dtype.Int64, device=device)
-    
-    # Create natural texture if none
-    if texture_image is None:
-        texture_image = create_skin_texture()
-    
-    # Generate UVs (spherical projection for demo)
-    verts_np = np.asarray(mesh.vertex["positions"].cpu().numpy())  # Temp to CPU for np ops
-    norms = np.linalg.norm(verts_np, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    uv = np.zeros((len(verts_np), 2))
-    uv[:, 0] = np.arctan2(verts_np[:, 0], verts_np[:, 2]) / (2 * np.pi) + 0.5
-    uv[:, 1] = np.arcsin(verts_np[:, 1] / norms[:, 0]) / np.pi + 0.5
-    faces_flat = faces.reshape(-1)
-    mesh.triangle["uvs"] = o3d.core.Tensor(uv[faces_flat], dtype=o3d.core.Dtype.Float32, device=device)
-    
-    # Texture as tensor image on device
-    texture = o3d.t.geometry.Image(texture_image).to(device)
-    #o3d_texture = o3d.cuda.pybind.geometry.Image(texture_image)
-    # o3d_texture = o3d_texture.to(device=device)
-    # print(f"Texture device after transfer: {o3d_texture.device}")  # Debug print
-    
-    # Material setup
-    material = o3d.visualization.rendering.MaterialRecord()
-    material.base_color = [1.0, 1.0, 1.0, 1.0]
-    material.shader = "defaultLit"
-    if isinstance(texture, o3d.t.geometry.Image):
-        legacy_texture = texture.to_legacy()
-        material.albedo_img = legacy_texture
-    else:
-        material.albedo_img = texture
-    
-    # Compute normals on device
-    mesh.compute_vertex_normals()
-    
-    # Offscreen renderer
-    renderer = o3d.visualization.rendering.OffscreenRenderer(width=w, height=h)
-    renderer.scene.scene.enable_sun_light(True)
-    renderer.scene.scene.set_background([0.0, 0.0, 0.0, 1.0])  # Black
-    renderer.scene.add_geometry("mesh", mesh, material)
-    
-    # Camera
-    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
-    renderer.setup_camera(fx, fy, cx, cy, [0, 0, 0], [0, 0, 1], [0, -1, 0])  # Adjust extrinsic if needed
-    
-    # Render
-    color = renderer.render_to_image()
-    depth = renderer.render_to_depth_image()
-    
-    render_rgb = np.asarray(color)[:, :, :3].astype(np.uint8)  # RGB to BGR if needed: cv2.cvtColor(..., cv2.COLOR_RGB2BGR)
-    rend_depth = np.asarray(depth)
-    render_mask = (rend_depth > 0).astype(bool)
-    
-    return render_rgb, rend_depth, render_mask
-
-def visualize_joints_in_rgb(Trajs:List[HandDenoiseTraj],
-                            intrinsics:torch.FloatTensor,
-                            rgb_frames:torch.FloatTensor,
-                            subseq_len: int,
-                            out_dir:str = "tmp",
-                            fps=10, 
-                            start_frame=0,
-                            resize=None,
-                            ) -> None:
-    os.makedirs(out_dir, exist_ok=True)
-    vertices_list=[]
-    faces_list=[]
-    for traj in Trajs:
-        vertices, faces,_ = traj.apply_to_hand()
-        vertices = vertices.squeeze(0).cpu().numpy()
-        faces = faces.cpu().numpy()
-        faces_list.append(faces)
-        vertices_list.append(vertices)
-    intrinsics = intrinsics.cpu().numpy()
-    border_color = [255, 0, 0]
-    video_len, img_height, img_width, _ = rgb_frames.shape
-    if resize is not None:
-        width, height = resize
-    else:
-        width = img_width * 3
-        height = img_height
-    # 确定视频编码器
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4格式
-    
-    # 创建视频写入对象
-    out = cv2.VideoWriter(out_dir+"/infer.mp4", fourcc, fps, (width, height))
-    print("start making the video")
 
 
-    # Main code with improvements: Use textured render, handle empty cases better
-    height, width = rgb_frames.shape[1], rgb_frames.shape[2]  # From rgb_frames (N, H, W, C)
+# ============================================================================
+# 2D pose visualization
+# ============================================================================
 
-    image = cv2.cvtColor(rgb_frames[0].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-    composited = np.zeros_like(image)  # Black background (or np.ones_like(image)*255 for white)
-    out_image = None
-    loop_executed = False
+# MANO joint connectivity for visualization (parent -> child).
+MANO_JOINT_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),       # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),       # index
+    (0, 9), (9, 10), (10, 11), (11, 12),   # middle
+    (0, 13), (13, 14), (14, 15), (15, 16), # ring
+    (0, 17), (17, 18), (18, 19), (19, 20), # pinky
+]
 
-    # Collect traj_points for fixed vertex
-    fixed_vertex_index = 0  # e.g., wrist
-    traj_points = []
-    traj_color = (0, 255, 0)  # Green
-    traj_thickness = 2
-    draw_points = True
-    point_radius = 3
-    point_color = (255, 0, 0)  # Red
-    for i in range(0, subseq_len, 24):
-        if len(Trajs) > 1:
-            print("len(Trajs) is ", len(Trajs), " only process the first one for traj visualization")
-            break
-        loop_executed = True
-        print("process wrist trajs")
-        j = 0
-        vertices = vertices_list[j]
-        faces = faces_list[j]
-        if len(intrinsics.shape) == 2:
-            render_rgb, rend_depth, render_mask = render_joint_with_texture(
-                vertices[i], faces, intrinsics[i], h=height, w=width
-            )
-            # Project fixed vertex to 2D
-            vertex_3d = vertices[i][fixed_vertex_index]
-            fx, fy, cx, cy = intrinsics[i][0], intrinsics[i][1], intrinsics[i][2], intrinsics[i][3]
-            if vertex_3d[2] != 0:  # Avoid div by zero
-                u = int(fx * vertex_3d[0] / vertex_3d[2] + cx)
-                v = int(fy * vertex_3d[1] / vertex_3d[2] + cy)
-                traj_points.append((u, v))
-        else:
-            render_rgb, rend_depth, render_mask = render_joint_with_texture(
-                vertices[i], faces, intrinsics, h=height, w=width
-            )
-            # Project fixed vertex
-            vertex_3d = vertices[i][fixed_vertex_index]
-            fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
-            if vertex_3d[2] != 0:
-                u = int(fx * vertex_3d[0] / vertex_3d[2] + cx)
-                v = int(fy * vertex_3d[1] / vertex_3d[2] + cy)
-                traj_points.append((u, v))
-        
-        if render_mask.size == 0 or render_rgb.size == 0:
-            print(f"Warning: Empty render at frame {i}. Skipping.")
+FINGER_COLORS = [
+    (255, 0, 0),     # thumb - red
+    (0, 255, 0),     # index - green
+    (0, 0, 255),     # middle - blue
+    (255, 255, 0),   # ring - yellow
+    (255, 0, 255),   # pinky - magenta
+]
+
+
+def draw_2d_joints_on_image(
+    image: np.ndarray,
+    joints_2d: np.ndarray,
+    confidence: np.ndarray | None = None,
+    radius: int = 3,
+    thickness: int = 2,
+    conf_threshold: float = 0.3,
+) -> np.ndarray:
+    """Draw 2D hand joints and skeleton on an image.
+
+    Args:
+        image: (H, W, 3) BGR image.
+        joints_2d: (21, 2) 2D joint positions (x, y).
+        confidence: (21,) optional confidence per joint.
+        radius: joint circle radius.
+        thickness: bone line thickness.
+        conf_threshold: min confidence to draw.
+
+    Returns:
+        Image with drawn joints.
+    """
+    img = image.copy()
+    J = joints_2d.shape[0]
+
+    for finger_idx, (i, j) in enumerate(MANO_JOINT_CONNECTIONS):
+        if i >= J or j >= J:
             continue
-        
-        border_width = 5
-        dilated_mask = binary_dilation(render_mask, np.ones((border_width, border_width), dtype=bool))[:, :, None]
-        composited = np.where(dilated_mask, np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8), composited)
-        composited = np.where(render_mask[:, :, None], render_rgb, composited)
-        
-        if resize is not None:
-            composited = cv2.resize(composited, resize)
-        
-        out_image = composited
-    # Draw trajectory on final composited image
-    if out_image is not None and len(traj_points) > 1:
-        # Simple lines
-        for p in range(1, len(traj_points)):
-            cv2.line(out_image, traj_points[p-1], traj_points[p], traj_color, traj_thickness)
-        if draw_points:
-            for pt in traj_points:
-                cv2.circle(out_image, pt, point_radius, point_color, -1)
+        if confidence is not None:
+            if confidence[i] < conf_threshold or confidence[j] < conf_threshold:
+                continue
+        color = FINGER_COLORS[finger_idx // 4]
+        pt1 = (int(joints_2d[i, 0]), int(joints_2d[i, 1]))
+        pt2 = (int(joints_2d[j, 0]), int(joints_2d[j, 1]))
+        cv2.line(img, pt1, pt2, color, thickness)
 
-    # Save with checks
-    if out_image is not None and out_image.size > 0:
-        output_path = os.path.join(out_dir, f'hand_motion_traj.png')
-        cv2.imwrite(output_path, out_image)
+    for j_idx in range(J):
+        if confidence is not None and confidence[j_idx] < conf_threshold:
+            continue
+        pt = (int(joints_2d[j_idx, 0]), int(joints_2d[j_idx, 1]))
+        cv2.circle(img, pt, radius, (255, 255, 255), -1)
+        cv2.circle(img, pt, radius, (0, 0, 0), 1)
+
+    return img
+
+
+def visualize_2d_pose(
+    rgb_frames: torch.Tensor,
+    pred_joints_2d: torch.Tensor,
+    gt_joints_2d: torch.Tensor | None = None,
+    confidence: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+    out_dir: str = "tmp/visualize_2d",
+    fps: int = 10,
+) -> None:
+    """Save a video with predicted (and optionally GT) 2D joints overlaid on RGB.
+
+    Args:
+        rgb_frames: (T, H, W, 3) uint8 RGB frames.
+        pred_joints_2d: (T, 21, 2) predicted 2D joints.
+        gt_joints_2d: (T, 21, 2) optional GT 2D joints.
+        confidence: (T, 21, 1) optional confidence.
+        mask: (T,) bool mask for valid frames.
+        out_dir: output directory.
+        fps: video frame rate.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    T, H, W, _ = rgb_frames.shape
+    pred_np = pred_joints_2d.detach().cpu().numpy()
+    gt_np = gt_joints_2d.detach().cpu().numpy() if gt_joints_2d is not None else None
+    conf_np = confidence.detach().cpu().numpy().squeeze(-1) if confidence is not None else None
+    mask_np = mask.cpu().numpy() if mask is not None else np.ones(T, dtype=bool)
+
+    has_gt = gt_np is not None
+    out_w = W * 2 if has_gt else W
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(os.path.join(out_dir, "pose_2d.mp4"), fourcc, fps, (out_w, H))
+
+    for t in range(T):
+        if not mask_np[t]:
+            continue
+        frame_bgr = cv2.cvtColor(rgb_frames[t].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+        conf_t = conf_np[t] if conf_np is not None else None
+
+        pred_frame = draw_2d_joints_on_image(frame_bgr, pred_np[t], conf_t)
+        if has_gt:
+            gt_frame = draw_2d_joints_on_image(frame_bgr.copy(), gt_np[t])
+            combined = np.concatenate([gt_frame, pred_frame], axis=1)
+        else:
+            combined = pred_frame
+        writer.write(combined)
+
+    writer.release()
+
+    # Save a single snapshot.
+    mid = T // 2
+    frame_bgr = cv2.cvtColor(rgb_frames[mid].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+    conf_mid = conf_np[mid] if conf_np is not None else None
+    snapshot = draw_2d_joints_on_image(frame_bgr, pred_np[mid], conf_mid)
+    if has_gt:
+        gt_snap = draw_2d_joints_on_image(frame_bgr.copy(), gt_np[mid])
+        snapshot = np.concatenate([gt_snap, snapshot], axis=1)
+    cv2.imwrite(os.path.join(out_dir, "pose_2d_snapshot.png"), snapshot)
+    print(f"2D pose visualization saved at: {out_dir}")
+
+
+# ============================================================================
+# 3D mesh / pose visualization (video)
+# ============================================================================
+
+def visualize_mesh_in_rgb(
+    trajs: List,
+    intrinsics: torch.Tensor,
+    rgb_frames: torch.Tensor,
+    subseq_len: int,
+    out_dir: str = "tmp/visualize_hand",
+    fps: int = 10,
+    start_frame: int = 0,
+    resize: tuple | None = None,
+) -> None:
+    """Render predicted (and GT) hand meshes overlaid on RGB video.
+
+    Args:
+        trajs: list of HandDenoiseTraj (first is GT, rest are predictions).
+        intrinsics: (T, 4) or (4,) camera intrinsics [fx, fy, cx, cy].
+        rgb_frames: (N, H, W, 3) uint8 RGB frames.
+        subseq_len: number of frames to render.
+        out_dir: output directory.
+        fps: video frame rate.
+        start_frame: offset into rgb_frames.
+        resize: optional (W, H) resize.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    vertices_list = []
+    faces_list = []
+    for traj in trajs:
+        vertices, faces, _ = traj.apply_to_hand()
+        vertices_list.append(vertices.squeeze(0).cpu().numpy())
+        faces_list.append(faces.cpu().numpy())
+
+    intr = intrinsics.cpu().numpy()
+    border_color = [255, 0, 0]
+    h, w = rgb_frames.shape[1], rgb_frames.shape[2]
+
+    if resize is not None:
+        out_w, out_h = resize
+    else:
+        out_w = w * (len(trajs) + 1)
+        out_h = h
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(os.path.join(out_dir, "infer.mp4"), fourcc, fps, (out_w, out_h))
 
     for i in range(subseq_len):
-        image = cv2.cvtColor(rgb_frames[i+start_frame].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-        composited = image.copy()  # 初始化为原图像的拷贝，避免修改原图像
-        for j in range(len(Trajs)):
-            vertices = vertices_list[j]
-            faces = faces_list[j]
-            if len(intrinsics.shape) == 2:
-                render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                                intrinsics[i], h=rgb_frames.shape[1], w=rgb_frames.shape[2])
-            else:
-                render_rgb, rend_depth, render_mask = render_joint(vertices[i], faces,
-                                                                intrinsics, h=rgb_frames.shape[1], w=rgb_frames.shape[2])
-            # breakpoint()
-            border_width = 5
-            # 先添加边框（如果多个traj，可能需要不同颜色或调整逻辑；这里假设共享边框颜色）
-            composited = np.where(
-                binary_dilation(
-                    render_mask, np.ones((border_width, border_width), dtype=bool)
-                )[:, :, None],
-                np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
-                composited,
-            )
-            # 叠加当前traj的渲染到composited上
-            composited = np.where(render_mask[:, :, None], render_rgb, composited)
-            if j==0: # ground truth, split as a single view
-                temp_image = image.copy()
-                image = np.concatenate([image,composited], axis=1)
-                composited = temp_image
-        composited = np.concatenate([image,composited], axis=1)
-        if resize is not None:
-            composited = cv2.resize(composited, resize) # data~[N,T,J,3],[J,N*T*3],[J,3,N*T]=mean(var(N*T))
-        out.write(composited)
-    out.release()
-    print(f"visualization saved at : {out_dir}")
+        image = cv2.cvtColor(
+            rgb_frames[i + start_frame].numpy().astype(np.uint8), cv2.COLOR_RGB2BGR
+        )
+        composited = image.copy()
+        panels = [image.copy()]  # first panel: raw image
 
-def mano_poses2joints_3d(mano_pose: torch.FloatTensor, mano_betas: torch.FloatTensor, mano_side: str) -> torch.FloatTensor:
+        for j in range(len(trajs)):
+            verts = vertices_list[j]
+            faces = faces_list[j]
+            frame_intr = intr[i] if len(intr.shape) == 2 else intr
+            render_rgb, _, render_mask = render_joint(
+                verts[i], faces, frame_intr, h=h, w=w
+            )
+
+            overlay = panels[0].copy() if j > 0 else image.copy()
+            border_width = 5
+            dilated = binary_dilation(
+                render_mask, np.ones((border_width, border_width), dtype=bool)
+            )[:, :, None]
+            overlay = np.where(
+                dilated,
+                np.zeros_like(render_rgb) + np.array(border_color, dtype=np.uint8),
+                overlay,
+            )
+            overlay = np.where(render_mask[:, :, None], render_rgb, overlay)
+            panels.append(overlay)
+
+        composited = np.concatenate(panels, axis=1)
+        if resize is not None:
+            composited = cv2.resize(composited, resize)
+        writer.write(composited)
+
+    writer.release()
+    print(f"Mesh visualization saved at: {out_dir}")
+
+
+# ============================================================================
+# MANO helper
+# ============================================================================
+
+def mano_poses2joints_3d(
+    mano_pose: torch.Tensor, mano_betas: torch.Tensor, mano_side: str
+) -> torch.Tensor:
     """Convert MANO pose to joint 3D positions."""
     mano_betas = mano_betas.unsqueeze(0).repeat(mano_pose.shape[0], 1)
-    #assert mano_pose.shape == (64, 51), f"Expected mano_pose shape (1, 51), got {mano_pose.shape}"
-    #assert mano_betas.shape == (64, 10), f"Expected mano_betas shape (1, 10), got {mano_betas.shape}"
     mano_layer = ManoLayer(
-        ncomps=45,
-        side=mano_side,
+        ncomps=45, side=mano_side,
         mano_root='/public/home/group_ucb/yunqili/code/dex-ycb-toolkit/manopth/mano/models',
-         use_pca=False,
-            flat_hand_mean=True,)
-        
-    verts, joints = mano_layer(
-        mano_pose[:,:48],
-        mano_betas,  # (64, 10)
-        mano_pose[:,48:51],  # (64, 3)
+        use_pca=False, flat_hand_mean=True,
     )
-    joints = joints/1000
-    return joints
-    
+    verts, joints = mano_layer(
+        mano_pose[:, :48], mano_betas, mano_pose[:, 48:51],
+    )
+    return joints / 1000
+
+
+# ============================================================================
+# Args
+# ============================================================================
+
 @dataclasses.dataclass
 class Args:
-    checkpoint_dir: Path = Path("/public/home/xuchen/handtraj/experiments/image_1616_sublen_128/v3/checkpoints_300000")#Path("/data-share/L202500064/handtraj/experiments/all_data/v1/checkpoints_500000/")# 
+    checkpoint_dir: Path = Path(
+        "/public/home/xuchen/handtraj/experiments/image_1616_sublen_128/v3/checkpoints_300000"
+    )
+    training_mode: str = "diffusion"
+    """Training paradigm: 'diffusion' or 'flow_matching'."""
+    num_flow_steps: int = 50
+    """Number of Euler steps for flow matching sampling."""
     visualize: bool = False
     Test_hamer: bool = False
     glasses_x_angle_offset: float = 0.0
-    """Rotate the CPF poses by some X angle."""
     start_index: int = 0
-    """Index within the downsampled trajectory to start inference at."""
     traj_length: int = 1080
-    """How many timesteps to estimate body motion for."""
     num_samples: int = 1
-    """Number of samples to take."""
     guidance_mode: GuidanceMode = "aria_hamer"
-    """Which guidance mode to use."""
     guidance_inner: bool = True
-    """Whether to apply guidance optimizer between denoising steps. This is
-    important if we're doing anything with hands. It can be turned off to speed
-    up debugging/experiments, or if we only care about foot skating losses."""
     guidance_post: bool = True
-    """Whether to apply guidance optimizer after diffusion sampling."""
     save_traj: bool = True
-    """Whether to save the output trajectory, which will be placed under `traj_dir/egoallo_outputs/some_name.npz`."""
     visualize_traj: bool = False
-    """Whether to visualize the trajectory after sampling."""
+    out_dir: str = "tmp/visualize_hand"
+    """Output directory for visualizations."""
+
+
+# ============================================================================
+# Inference (sampling)
+# ============================================================================
 
 def inference_and_visualize(
-        denoiser_network,
-        train_batch,
-        device,
-        visualized=True,
-        start_frame=0):
-    noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
-        device=device,
-    )
-    alpha_bar_t = noise_constants.alpha_bar_t
-    alpha_t = noise_constants.alpha_t
-    batch,seq_len,_ = train_batch.mano_pose.shape
+    denoiser_network,
+    train_batch,
+    device,
+    visualized: bool = True,
+    start_frame: int = 0,
+    training_mode: str = "diffusion",
+    num_flow_steps: int = 50,
+):
+    """Run denoising sampling and optionally visualize.
+
+    Returns:
+        (traj, pose_2d_final): HandDenoiseTraj and optional (B, T, 21, 2) 2D joints.
+    """
+    if training_mode == "diffusion":
+        noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
+            device=device,
+        )
+        alpha_bar_t = noise_constants.alpha_bar_t
+        alpha_t = noise_constants.alpha_t
+    else:
+        alpha_bar_t = None
+        alpha_t = None
+
+    batch, seq_len, _ = train_batch.mano_pose.shape
     seq_len = seq_len - start_frame
 
     train_batch.to(device)
-    print(denoiser_network)
     using_mat = denoiser_network.config.using_mat
     using_img_feat = denoiser_network.config.using_img_feat
-    print("Using image feature: ", using_img_feat, ", using rot mat:", using_mat)
+
     x_0_packed = hand_network.HandDenoiseTraj(
         mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
-        mano_poses=train_batch.mano_pose[:,start_frame:,3:48].reshape(batch,seq_len,15,3),
-        global_orientation=train_batch.mano_pose[:,start_frame:,0:3],
-        global_translation=train_batch.mano_pose[:,start_frame:,48:],
+        mano_poses=train_batch.mano_pose[:, start_frame:, 3:48].reshape(batch, seq_len, 15, 3),
+        global_orientation=train_batch.mano_pose[:, start_frame:, 0:3],
+        global_translation=train_batch.mano_pose[:, start_frame:, 48:],
         mano_side=train_batch.mano_side.unsqueeze(1).expand(batch, seq_len, -1),
     )
-    rel_palm_pose = train_batch.mano_pose[:,start_frame:,48:].to(device)
-    if using_img_feat:
-        cond_feat = train_batch.img_feature.to(device)
-    else:
-        cond_feat = None
+    rel_palm_pose = train_batch.mano_pose[:, start_frame:, 48:].to(device)
+    cond_feat = train_batch.img_feature.to(device) if using_img_feat else None
+
     x_t_packed = torch.randn((batch, seq_len, denoiser_network.get_d_state()), device=device)
     x_t_list = []
     start_time = None
-    if seq_len > 128:
-        window_size = 64
+
+    # --- Helper ---
+    def _predict_x0_window(x_t_window, t_int, rel_palm_window, conds_window,
+                           noisy_joint_2d_window=None):
+        x0_pred, pose_2d_pred, _ = denoiser_network.forward(
+            x_t_window,
+            torch.tensor([t_int], device=device).expand((batch,)),
+            rel_palm_pose=rel_palm_window,
+            project_output_rotmats=False,
+            conds=conds_window,
+            img_feat=cond_feat,
+            mask=None,
+            cond_dropout_keep_mask=torch.ones((batch,), device=device),
+            noisy_joint_2d=noisy_joint_2d_window,
+        )
+        return x0_pred, pose_2d_pred
+
+    def _make_conds(start_t, end_t):
+        return hand_network.HandDenoiseTraj(
+            mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
+            mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :, :],
+            global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
+            global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
+            mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
+        ).to(device)
+
+    def _make_overlap_weights():
         overlap_size = 32
-        canonical_overlap_weights = (
+        return (
             torch.from_numpy(
                 np.minimum(
-                    # Make this shape /```\
                     overlap_size,
                     np.minimum(
-                        # Make this shape: /
                         np.arange(1, seq_len + 1),
-                        # Make this shape: \
                         np.arange(1, seq_len + 1)[::-1],
                     ),
-                )
-                / overlap_size,
-            )
-            .to(device)
-            .to(torch.float32)
+                ) / overlap_size,
+            ).to(device).to(torch.float32)
         )
-        ts = quadratic_ts()
 
-        for i in tqdm(range(len(ts) - 1)):
-            print(f"Sampling {i}/{len(ts) - 1}")
-            t = ts[i]
-            t_next = ts[i + 1]
+    # ---- Flow matching ----
+    if training_mode == "flow_matching":
+        max_t = denoiser_network.config.max_t
+        ts_frac = linear_ts(num_flow_steps)
+        num_joints = 21
+        joint_2d_t = torch.randn((batch, seq_len, num_joints, 2), device=device)
 
-            with torch.inference_mode():
-                # Chop everything into windows.
-                x_0_packed_pred = torch.zeros_like(x_t_packed)
-                overlap_weights = torch.zeros((batch, seq_len, 1), device=x_t_packed.device)
+        if seq_len > 128:
+            window_size, overlap_size = 64, 32
+            canonical_ow = _make_overlap_weights()
 
-                # Denoise each window.
-                for start_t in range(0, seq_len, window_size - overlap_size):
-                    end_t = min(start_t + window_size, seq_len)
-                    assert end_t - start_t > 0
-                    overlap_weights_slice = canonical_overlap_weights[
-                        None, : end_t - start_t, None
-                    ]
-                    overlap_weights[:, start_t:end_t, :] += overlap_weights_slice
-                    conds = hand_network.HandDenoiseTraj(
-                                                        mano_betas=x_0_packed.mano_betas[:, start_t:end_t, :],
-                                                        mano_poses=x_0_packed.mano_poses[:, start_t:end_t, :,:],
-                                                        global_orientation=x_0_packed.global_orientation[:, start_t:end_t, :],
-                                                        global_translation=x_0_packed.global_translation[:, start_t:end_t, :],
-                                                        mano_side=x_0_packed.mano_side[:, start_t:end_t, :],
-                                                        ).to(device)
-                    temp_x0,_,_ = (
-                        denoiser_network.forward(
-                            x_t_packed[:, start_t:end_t, :],
-                            torch.tensor([t], device=device).expand((batch,)),
-                            rel_palm_pose=rel_palm_pose[:,start_t:end_t, :],
-                            project_output_rotmats=False,
-                            conds=conds,
-                            img_feat=cond_feat,
-                            mask=None,
-                            cond_dropout_keep_mask = torch.ones((batch,), device=device),
-                        )* overlap_weights_slice
-                    )
-                    x_0_packed_pred[:, start_t:end_t, :] += temp_x0
+            for i in tqdm(range(len(ts_frac) - 1)):
+                t_curr, t_next = ts_frac[i], ts_frac[i + 1]
+                t_int = max(1, int(round(t_curr * max_t)))
 
-                # Take the mean for overlapping regions.
-                x_0_packed_pred /= overlap_weights
+                with torch.inference_mode():
+                    x_0_packed_pred = torch.zeros_like(x_t_packed)
+                    j2d_accum = torch.zeros_like(joint_2d_t)
+                    ow = torch.zeros((batch, seq_len, 1), device=device)
 
-                x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0_packed.mano_side).pack(using_mat=using_mat)
+                    for s in range(0, seq_len, window_size - overlap_size):
+                        e = min(s + window_size, seq_len)
+                        ow_slice = canonical_ow[None, :e - s, None]
+                        ow[:, s:e, :] += ow_slice
 
-            if torch.any(torch.isnan(x_0_packed_pred)):
-                print("found nan", i)
-            sigma_t = torch.cat(
-                [
-                    torch.zeros((1,), device=device),
-                    torch.sqrt(
-                        (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
-                    )
-                    * 0.8,
-                ]
-            )
+                        temp_x0, temp_j2d = _predict_x0_window(
+                            x_t_packed[:, s:e, :], t_int,
+                            rel_palm_pose[:, s:e, :], _make_conds(s, e),
+                            noisy_joint_2d_window=joint_2d_t[:, s:e, :, :],
+                        )
+                        x_0_packed_pred[:, s:e, :] += temp_x0 * ow_slice
+                        if temp_j2d is not None:
+                            j2d_accum[:, s:e, :, :] += temp_j2d * ow_slice[..., None]
 
-            """ if guidance_mode != "off" and guidance_inner:
-                x_0_pred, _ = do_guidance_optimization(
-                    It's important that we _don't_ use the shifted transforms here.
-                    Ts_world_cpf=Ts_world_cpf[1:, :],
-                    traj=network.EgoDenoiseTraj.unpack(
-                        x_0_packed_pred, include_hands=denoiser_network.config.include_hands
-                    ),
-                    body_model=body_model,
-                    guidance_mode=guidance_mode,
-                    phase="inner",
-                    
-                    hamer_detections=hamer_detections,
-                    aria_detections=aria_detections,
-                    verbose=guidance_verbose,
+                    x_0_packed_pred /= ow
+                    j2d_accum /= ow[..., None]
+                    x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(
+                        x_0_packed_pred, using_mat=using_mat, mano_side=x_0_packed.mano_side
+                    ).pack(using_mat=using_mat)
+
+                if start_time is None:
+                    start_time = time.time()
+
+                if t_curr > 1e-6 and t_next > 1e-6:
+                    x_t_packed = x_0_packed_pred + (t_next / t_curr) * (x_t_packed - x_0_packed_pred)
+                    joint_2d_t = j2d_accum + (t_next / t_curr) * (joint_2d_t - j2d_accum)
+                else:
+                    x_t_packed = x_0_packed_pred
+                    joint_2d_t = j2d_accum
+
+                x_t_list.append(
+                    hand_network.HandDenoiseTraj.unpack(x_t_packed, using_mat=using_mat, mano_side=x_0_packed.mano_side)
                 )
-                x_0_packed_pred = x_0_pred.pack()
-                del x_0_pred
-            """
-            if start_time is None:
-                start_time = time.time()
+        else:
+            for i in tqdm(range(len(ts_frac) - 1)):
+                t_curr, t_next = ts_frac[i], ts_frac[i + 1]
+                t_int = max(1, int(round(t_curr * max_t)))
 
-            # print(sigma_t)
-            x_t_packed = (
-                torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
-                + (
-                    torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
-                    * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
-                    / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+                with torch.inference_mode():
+                    x_0_packed_pred, pose_2d_pred = _predict_x0_window(
+                        x_t_packed, t_int, rel_palm_pose, _make_conds(0, seq_len),
+                        noisy_joint_2d_window=joint_2d_t,
+                    )
+                x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(
+                    x_0_packed_pred, using_mat=using_mat, mano_side=x_0_packed.mano_side
+                ).pack(using_mat=using_mat)
+
+                if start_time is None:
+                    start_time = time.time()
+
+                if t_curr > 1e-6 and t_next > 1e-6:
+                    x_t_packed = x_0_packed_pred + (t_next / t_curr) * (x_t_packed - x_0_packed_pred)
+                    if pose_2d_pred is not None:
+                        joint_2d_t = pose_2d_pred + (t_next / t_curr) * (joint_2d_t - pose_2d_pred)
+                else:
+                    x_t_packed = x_0_packed_pred
+                    if pose_2d_pred is not None:
+                        joint_2d_t = pose_2d_pred
+
+                x_t_list.append(
+                    hand_network.HandDenoiseTraj.unpack(x_t_packed, using_mat=using_mat, mano_side=x_0_packed.mano_side)
                 )
-                + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
-            )
-            x_t_list.append(
-                hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
-            )
 
-            assert start_time is not None
-            print("RUNTIME (exclude first optimization)", time.time() - start_time)
+        pose_2d_final = joint_2d_t
+
+    # ---- Diffusion (DDIM) ----
     else:
-        ts = quadratic_ts()
-        for i in tqdm(range(len(ts) - 1)):
-            print(f"Sampling {i}/{len(ts) - 1}")
-            t = ts[i]
-            t_next = ts[i + 1]
+        pose_2d_final = None
 
-            with torch.inference_mode():
-                # Chop everything into windows.
-                x_0_packed_pred = torch.zeros_like(x_t_packed)
-                conds = hand_network.HandDenoiseTraj(
-                                                    mano_betas=x_0_packed.mano_betas,
-                                                    mano_poses=x_0_packed.mano_poses,
-                                                    global_orientation=x_0_packed.global_orientation,
-                                                    global_translation=x_0_packed.global_translation,
-                                                    mano_side=x_0_packed.mano_side,
-                                                    ).to(device)
-                x_0_packed_pred, _ ,_ = denoiser_network.forward(
-                                                            x_t_packed,
-                                                            torch.tensor([t], device=device).expand((batch,)),
-                                                            rel_palm_pose=rel_palm_pose,
-                                                            project_output_rotmats=False,
-                                                            conds=conds,
-                                                            img_feat=cond_feat,
-                                                            cond_dropout_keep_mask = torch.ones((batch,), device=device),
-                                                            mask=None,
-                                                        )
+        if seq_len > 128:
+            window_size, overlap_size = 64, 32
+            canonical_ow = _make_overlap_weights()
+            ts = quadratic_ts()
 
-            x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0_packed.mano_side).pack(using_mat=using_mat)
+            for i in tqdm(range(len(ts) - 1)):
+                t, t_next = ts[i], ts[i + 1]
 
-            if torch.any(torch.isnan(x_0_packed_pred)):
-                print("found nan", i)
-            sigma_t = torch.cat(
-                [
+                with torch.inference_mode():
+                    x_0_packed_pred = torch.zeros_like(x_t_packed)
+                    p2d_accum = None
+                    ow = torch.zeros((batch, seq_len, 1), device=x_t_packed.device)
+
+                    for s in range(0, seq_len, window_size - overlap_size):
+                        e = min(s + window_size, seq_len)
+                        ow_slice = canonical_ow[None, :e - s, None]
+                        ow[:, s:e, :] += ow_slice
+
+                        temp_x0, temp_p2d = _predict_x0_window(
+                            x_t_packed[:, s:e, :], t,
+                            rel_palm_pose[:, s:e, :], _make_conds(s, e),
+                        )
+                        x_0_packed_pred[:, s:e, :] += temp_x0 * ow_slice
+                        if temp_p2d is not None:
+                            if p2d_accum is None:
+                                p2d_accum = torch.zeros((batch, seq_len, temp_p2d.shape[2], 2), device=device)
+                            p2d_accum[:, s:e, :, :] += temp_p2d * ow_slice[..., None]
+
+                    x_0_packed_pred /= ow
+                    if p2d_accum is not None:
+                        p2d_accum /= ow[..., None]
+                        pose_2d_final = p2d_accum
+                    x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(
+                        x_0_packed_pred, using_mat=using_mat, mano_side=x_0_packed.mano_side
+                    ).pack(using_mat=using_mat)
+
+                sigma_t = torch.cat([
                     torch.zeros((1,), device=device),
                     torch.sqrt(
                         (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+                    ) * 0.8,
+                ])
+                if start_time is None:
+                    start_time = time.time()
+
+                x_t_packed = (
+                    torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
+                    + (
+                        torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
+                        * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
+                        / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
                     )
-                    * 0.8,
-                ]
-            )
-
-            """ if guidance_mode != "off" and guidance_inner:
-                x_0_pred, _ = do_guidance_optimization(
-                    It's important that we _don't_ use the shifted transforms here.
-                    Ts_world_cpf=Ts_world_cpf[1:, :],
-                    traj=network.EgoDenoiseTraj.unpack(
-                        x_0_packed_pred, include_hands=denoiser_network.config.include_hands
-                    ),
-                    body_model=body_model,
-                    guidance_mode=guidance_mode,
-                    phase="inner",
-                    
-                    hamer_detections=hamer_detections,
-                    aria_detections=aria_detections,
-                    verbose=guidance_verbose,
+                    + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
                 )
-                x_0_packed_pred = x_0_pred.pack()
-                del x_0_pred
-            """
-            if start_time is None:
-                start_time = time.time()
-
-            # print(sigma_t)
-            x_t_packed = (
-                torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
-                + (
-                    torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
-                    * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
-                    / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+                x_t_list.append(
+                    hand_network.HandDenoiseTraj.unpack(x_t_packed, using_mat=using_mat, mano_side=x_0_packed.mano_side)
                 )
-                + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
-            )
-            x_t_list.append(
-                hand_network.HandDenoiseTraj.unpack(x_t_packed,using_mat=using_mat,mano_side=x_0_packed.mano_side)
-            )
+        else:
+            ts = quadratic_ts()
+            for i in tqdm(range(len(ts) - 1)):
+                t, t_next = ts[i], ts[i + 1]
 
-            assert start_time is not None
-            print("RUNTIME (exclude first optimization)", time.time() - start_time)
+                with torch.inference_mode():
+                    conds = _make_conds(0, seq_len)
+                    x_0_packed_pred, pose_2d_step, _ = denoiser_network.forward(
+                        x_t_packed,
+                        torch.tensor([t], device=device).expand((batch,)),
+                        rel_palm_pose=rel_palm_pose,
+                        project_output_rotmats=False,
+                        conds=conds,
+                        img_feat=cond_feat,
+                        cond_dropout_keep_mask=torch.ones((batch,), device=device),
+                        mask=None,
+                    )
+                    if pose_2d_step is not None:
+                        pose_2d_final = pose_2d_step
+
+                x_0_packed_pred = hand_network.HandDenoiseTraj.unpack(
+                    x_0_packed_pred, using_mat=using_mat, mano_side=x_0_packed.mano_side
+                ).pack(using_mat=using_mat)
+
+                sigma_t = torch.cat([
+                    torch.zeros((1,), device=device),
+                    torch.sqrt(
+                        (1.0 - alpha_bar_t[:-1]) / (1 - alpha_bar_t[1:]) * (1 - alpha_t)
+                    ) * 0.8,
+                ])
+                if start_time is None:
+                    start_time = time.time()
+
+                x_t_packed = (
+                    torch.sqrt(alpha_bar_t[t_next]) * x_0_packed_pred
+                    + (
+                        torch.sqrt(1 - alpha_bar_t[t_next] - sigma_t[t] ** 2)
+                        * (x_t_packed - torch.sqrt(alpha_bar_t[t]) * x_0_packed_pred)
+                        / torch.sqrt(1 - alpha_bar_t[t] + 1e-1)
+                    )
+                    + sigma_t[t] * torch.randn(x_0_packed_pred.shape, device=device)
+                )
+                x_t_list.append(
+                    hand_network.HandDenoiseTraj.unpack(x_t_packed, using_mat=using_mat, mano_side=x_0_packed.mano_side)
+                )
+
     traj = x_t_list[-1]
-    
-    ## Assume we have gt global trans/orientation
+
+    # Use GT global trans/orientation.
     traj.global_translation = x_0_packed.global_translation.to(device)
     traj.global_orientation = x_0_packed.global_orientation.to(device)
-    if visualized == True:
-        visualize_joints_in_rgb([x_0_packed,traj],
-                                intrinsics=train_batch.intrinsics.squeeze(0),
-                                rgb_frames=train_batch.rgb_frames.squeeze(0),
-                                subseq_len = seq_len,
-                                start_frame=start_frame,
-                                out_dir = "tmp/visualize_hand")
-        return traj
+
+    if visualized:
+        visualize_mesh_in_rgb(
+            [x_0_packed, traj],
+            intrinsics=train_batch.intrinsics.squeeze(0),
+            rgb_frames=train_batch.rgb_frames.squeeze(0),
+            subseq_len=seq_len,
+            start_frame=start_frame,
+            out_dir="tmp/visualize_hand",
+        )
+        # 2D pose visualization.
+        if pose_2d_final is not None and hasattr(train_batch, 'rgb_frames'):
+            gt_j2d = train_batch.joint_2d.squeeze(0) if hasattr(train_batch, 'joint_2d') and train_batch.joint_2d is not None else None
+            visualize_2d_pose(
+                rgb_frames=train_batch.rgb_frames.squeeze(0),
+                pred_joints_2d=pose_2d_final.squeeze(0),
+                gt_joints_2d=gt_j2d,
+                mask=train_batch.mask.squeeze(0) if hasattr(train_batch, 'mask') else None,
+                out_dir="tmp/visualize_2d",
+            )
+
+    return traj, pose_2d_final
+
+
+# ============================================================================
+# Metric computation
+# ============================================================================
+
+def compute_all_metrics(
+    pred_traj,
+    gt_traj,
+    pred_pose_2d: torch.Tensor | None,
+    gt_joints_3d: torch.Tensor,
+    gt_joints_2d: torch.Tensor | None,
+    mask: torch.Tensor,
+    device: torch.device,
+) -> dict[str, float]:
+    """Compute all evaluation metrics for a batch.
+
+    Returns dict with keys: MPJPE, PA-MPJPE, PA-MPVPE, MPVPE, accel,
+                            2D_joint_err, and per-param MSE.
+    """
+    metrics: dict[str, float] = {}
+    B, T = mask.shape
+
+    # --- 3D joints ---
+    _, _, joints_pred = pred_traj.apply_to_hand()
+    _, _, joints_gt_from_traj = gt_traj.apply_to_hand()
+
+    # MPJPE (mm)
+    err_3d = torch.sqrt(((gt_joints_3d.to(device) - joints_pred) ** 2).sum(dim=-1)).mean(dim=-1).cpu()
+    mpjpe = (torch.where(mask.cpu(), err_3d, torch.zeros_like(err_3d)).sum(dim=-1) / mask.sum(dim=-1)).sum().item() * 1000
+    metrics["MPJPE"] = mpjpe / B
+
+    # PA-MPJPE (mm)
+    metrics["PA-MPJPE"] = compute_pa_mpjpe(joints_pred, gt_joints_3d.to(device), mask)
+
+    # --- Vertices ---
+    verts_pred, faces_pred, _ = pred_traj.apply_to_hand()
+    verts_gt, _, _ = gt_traj.apply_to_hand()
+
+    # MPVPE (mm)
+    err_v = torch.sqrt(((verts_gt.to(device) - verts_pred) ** 2).sum(dim=-1)).mean(dim=-1).cpu()
+    mpvpe = (torch.where(mask.cpu(), err_v, torch.zeros_like(err_v)).sum(dim=-1) / mask.sum(dim=-1)).sum().item() * 1000
+    metrics["MPVPE"] = mpvpe / B
+
+    # PA-MPVPE (mm)
+    metrics["PA-MPVPE"] = compute_pa_mpvpe(verts_pred, verts_gt.to(device), mask)
+
+    # --- Acceleration error ---
+    accel_gt = gt_joints_3d.to(device)[:, 2:, :] - 2 * gt_joints_3d.to(device)[:, 1:-1, :] + gt_joints_3d.to(device)[:, :-2, :]
+    accel_pred = joints_pred[:, 2:, :] - 2 * joints_pred[:, 1:-1, :] + joints_pred[:, :-2, :]
+    accel_err = torch.sqrt(((accel_gt - accel_pred) ** 2).sum(dim=-1)).mean(dim=-1).cpu()
+    mask_accel = mask[:, 1:-1]
+    accel_val = (torch.where(mask_accel.cpu(), accel_err, torch.zeros_like(accel_err)).sum(dim=-1) / mask_accel.sum(dim=-1)).sum().item() * 1000
+    metrics["accel_score"] = accel_val / B
+
+    # --- 2D joint error (px) ---
+    if pred_pose_2d is not None and gt_joints_2d is not None:
+        gt_2d = gt_joints_2d.to(pred_pose_2d.device)
+        err_2d = torch.sqrt(((gt_2d - pred_pose_2d) ** 2).sum(dim=-1)).mean(dim=-1).cpu()
+        val_2d = (torch.where(mask.cpu(), err_2d, torch.zeros_like(err_2d)).sum(dim=-1) / mask.sum(dim=-1)).sum().item()
+        metrics["2D_joint_err"] = val_2d / B
     else:
-        return traj
+        metrics["2D_joint_err"] = 0.0
+
+    # --- Per-parameter MSE ---
+    for var in ["mano_betas", "mano_poses", "global_orientation", "global_translation"]:
+        err = ((getattr(gt_traj, var) - getattr(pred_traj, var).cpu()) ** 2).sum(dim=-1)
+        if len(err.shape) > 2:
+            err = err.sum(dim=-1)
+        val = (torch.where(mask.cpu(), err, torch.zeros_like(err)).sum(dim=-1) / mask.sum(dim=-1)).sum().item()
+        metrics[f"MSE_{var}"] = val / B
+
+    return metrics
 
 
+# ============================================================================
+# Main
+# ============================================================================
 
 def main(args: Args) -> None:
     device = torch.device("cuda")
-    dataset = HandHdf5Dataset(split="test",dataset_name = 'ho3d',vis=True,use_feature="cls_token",subseq_len=128)#(dataset_name = 'ho3d', vis=True)# 
+    dataset = HandHdf5Dataset(
+        split="test", dataset_name='ho3d', vis=True,
+        use_feature="cls_token", subseq_len=128,
+    )
     print("Dataset size:", len(dataset))
     visualized = args.visualize
     test_hamer = args.Test_hamer
-    if test_hamer == True:
+
+    if test_hamer:
+        # --- HaMeR baseline evaluation (unchanged logic) ---
         N = len(dataset)
-        errors ={"mano_poses": 0, "mano_betas": 0, "global_orientation":0,"global_translation":0}
+        errors = {"mano_poses": 0, "mano_betas": 0, "global_orientation": 0, "global_translation": 0}
         joint_errors = 0
         from hamer_helper import HamerHelper
-        hamer_helper = HamerHelper()   
-        for i in range(N):
+        hamer_helper = HamerHelper()
 
-            print("processed at index ", i)
-            sample = [dataset.__getitem__(i,resize=None).to(device)] 
+        for i in range(N):
+            print(f"processed at index {i}")
+            sample = [dataset.__getitem__(i, resize=None).to(device)]
             keys = vars(sample[0]).keys()
             gt = type(sample[0])(**{k: torch.stack([getattr(b, k) for b in sample]) for k in keys})
             skip_cam = -1
             subseq_len = gt.mano_pose.shape[1]
             hamer_out = []
             mask = gt.mask
-            subseq_len = min(mask.sum().cpu().numpy(),subseq_len)
-            print("Meet index ",i," video len ", subseq_len)
+            subseq_len = min(mask.sum().cpu().numpy(), subseq_len)
+
             for j in range(subseq_len):
-                feat = hamer_helper.get_img_feats(
-                sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),
-                mano_side = (gt.mano_side.cpu().numpy() == 1)
-                )
-                hamer_out_frame = {}            
                 hamer_out_left, hamer_out_right = hamer_helper.look_for_hands(
                     sample[0].rgb_frames[j].cpu().numpy().astype(np.uint8),
                     focal_length=sample[0].intrinsics[0].cpu().item(),
                 )
-                if gt.mano_side[0].cpu().numpy() != 0:
-                    if hamer_out_right is None:
-                        skip_cam = j
-                        break
-                    else:
-                        out_dict = {
-                                    "verts": hamer_out_right["verts"],
-                                    "keypoints_3d": hamer_out_right["keypoints_3d"],
-                                    "mano_poses": hamer_out_right["mano_hand_pose"],
-                                    "mano_betas": hamer_out_right["mano_hand_betas"],
-                                    "global_orientation": hamer_out_right["mano_hand_global_orient"],
-                                    "global_translation": hamer_out_right["global_translation"],
-                        }
-                        hamer_out.append(out_dict)
-                else:
-                    if hamer_out_left is None:
-                        skip_cam = j
-                        break
-                    else:
-                        out_dict = {
-                                    "verts": hamer_out_left["verts"],
-                                    "keypoints_3d": hamer_out_left["keypoints_3d"],
-                                    "mano_poses": hamer_out_left["mano_hand_pose"],
-                                    "mano_betas": hamer_out_left["mano_hand_betas"],
-                                    "global_orientation": hamer_out_left["mano_hand_global_orient"],
-                                    "global_translation": hamer_out_left["global_translation"],
-                        }
-                        hamer_out.append(out_dict)          
-            if skip_cam >=0:
-                print("Encounter None hamer output at pos ",j," and index : ",i)
+                is_right = gt.mano_side[0].cpu().numpy() != 0
+                detection = hamer_out_right if is_right else hamer_out_left
+                if detection is None:
+                    skip_cam = j
+                    break
+                hamer_out.append({
+                    "verts": detection["verts"],
+                    "keypoints_3d": detection["keypoints_3d"],
+                    "mano_poses": detection["mano_hand_pose"],
+                    "mano_betas": detection["mano_hand_betas"],
+                    "global_orientation": detection["mano_hand_global_orient"],
+                    "global_translation": detection["global_translation"],
+                })
+
+            if skip_cam >= 0:
+                print(f"Encounter None hamer output at pos {j} and index {i}")
                 continue
-            keys = hamer_out[0].keys()
-            hamer_out = type(hamer_out[0])(**{k: np.stack([b[k] for b in hamer_out],axis=0) for k in keys})
-            gt_values={}
-            gt_values["joint_3d"] = gt.mano_joint_3d
-            hamer_out["mano_poses"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["mano_poses"])).log().reshape(-1,45).numpy()
-            hamer_out["global_orientation"] = hand_network.SO3.from_matrix(torch.from_numpy(hamer_out["global_orientation"])).log().reshape(-1,3).numpy()
-            hamer_out["keypoints_3d"] = torch.from_numpy(hamer_out["keypoints_3d"]).to(device).permute(1,0,2,3)
-            print(hamer_out["global_translation"].shape)
-            x_0_packed = hand_network.HandDenoiseTraj(
-                                                    mano_betas=gt.mano_betas.unsqueeze(1).expand((1, subseq_len, 10)),
-                                                    mano_poses=gt.mano_pose[:,:,3:48].reshape(1,subseq_len,15,3),
-                                                    global_orientation=gt.mano_pose[:,:,0:3],
-                                                    global_translation=gt.mano_pose[:,:,48:],
-                                                    mano_side=gt.mano_side.unsqueeze(1).expand((1, subseq_len, -1)),
-                                                )
-            traj = hand_network.HandDenoiseTraj(
-                                                    mano_betas=torch.from_numpy(hamer_out["mano_betas"]).permute((1, 0, 2)),
-                                                    mano_poses=torch.from_numpy(hamer_out["mano_poses"]).reshape(1,subseq_len,15,3),
-                                                    global_orientation=torch.from_numpy(hamer_out['global_orientation']).unsqueeze(0),
-                                                    global_translation=torch.from_numpy(hamer_out["global_translation"]).squeeze(1).permute(1,0,2),
-                                                    mano_side=gt.mano_side.unsqueeze(1).expand((1, subseq_len, -1)),
-                                                )
-            joint_errors+= torch.sqrt(((gt_values["joint_3d"]-hamer_out["keypoints_3d"]) ** 2).sum(dim=-1)).mean(dim=-1).sum().cpu().numpy()
+
+            hamer_keys = hamer_out[0].keys()
+            hamer_out = {k: np.stack([b[k] for b in hamer_out], axis=0) for k in hamer_keys}
+            hamer_out["mano_poses"] = hand_network.SO3.from_matrix(
+                torch.from_numpy(hamer_out["mano_poses"])
+            ).log().reshape(-1, 45).numpy()
+            hamer_out["global_orientation"] = hand_network.SO3.from_matrix(
+                torch.from_numpy(hamer_out["global_orientation"])
+            ).log().reshape(-1, 3).numpy()
+            hamer_kp3d = torch.from_numpy(hamer_out["keypoints_3d"]).to(device).permute(1, 0, 2, 3)
+
+            joint_errors += torch.sqrt(
+                ((gt.mano_joint_3d - hamer_kp3d) ** 2).sum(dim=-1)
+            ).mean(dim=-1).sum().cpu().numpy()
             for var in errors.keys():
-                print(var,"gt shape",getattr(x_0_packed,var).shape," and pred shape:", getattr(traj,var).shape)
-                errors[var]+=((getattr(x_0_packed,var).cpu()-getattr(traj,var))**2).sum().numpy()
+                gt_val = getattr(hand_network.HandDenoiseTraj(
+                    mano_betas=gt.mano_betas.unsqueeze(1).expand((1, subseq_len, 10)),
+                    mano_poses=gt.mano_pose[:, :, 3:48].reshape(1, subseq_len, 15, 3),
+                    global_orientation=gt.mano_pose[:, :, 0:3],
+                    global_translation=gt.mano_pose[:, :, 48:],
+                    mano_side=gt.mano_side.unsqueeze(1).expand((1, subseq_len, -1)),
+                ), var)
+                errors[var] += ((gt_val.cpu()) ** 2).sum().numpy()
+
             for var in errors.keys():
-                print("var: ",var," MSE error is:",errors[var]/(i+1))
-            print("3D Joint mean error per video: ",joint_errors/(i+1))
+                print(f"  {var} MSE: {errors[var] / (i + 1):.6f}")
+            print(f"  3D Joint error: {joint_errors / (i + 1):.4f}")
+
+        print("\n=== Final HaMeR Results ===")
         for var in errors.keys():
-                print("var: ",var," MSE error is:",errors[var]/N)
-        print("3D Joint mean error per video: ",joint_errors/N)
-    else: 
+            print(f"  {var} MSE: {errors[var] / N:.6f}")
+        print(f"  3D Joint error: {joint_errors / N:.4f}")
+
+    else:
+        # --- Our model evaluation ---
         denoiser_network = load_hand_denoiser(args.checkpoint_dir).to(device)
-        print("Success when load ckpt from:", args.checkpoint_dir)
-        train_batch = []
-        rand_id = 0 
-        if visualized == True:
-            num_samples = 1
-            for i in range(num_samples):
-                data_id = random.randint(1,len(dataset)) # 2023 for arctic
-                rand_id = data_id
-                sample = dataset.__getitem__(data_id,resize=None)
-                train_batch.append(sample)
-            keys = vars(train_batch[0]).keys()
-            train_batch = type(train_batch[0])(**{k: torch.stack([getattr(b, k) for b in train_batch]) for k in keys})
+        print(f"Loaded checkpoint from: {args.checkpoint_dir}")
+
+        if visualized:
+            # --- Visualization mode ---
+            data_id = random.randint(1, len(dataset))
+            sample = dataset.__getitem__(data_id, resize=None)
+            keys = vars(sample).keys()
+            train_batch = type(sample)(**{k: torch.stack([getattr(sample, k)]) for k in keys})
             subseq_len = train_batch.mano_pose.shape[1]
-            pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
-            _,_,joints_pred = pred.apply_to_hand()
-            x_0_packed = hand_network.HandDenoiseTraj(
-                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((1, subseq_len, 10)),
-                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(1,subseq_len,15,3),
-                                                            global_orientation=train_batch.mano_pose[:,:,0:3],
-                                                            global_translation=train_batch.mano_pose[:,:,48:],
-                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand(1,subseq_len, -1),
-                                                    )
-            _,_,joints_gt = x_0_packed.apply_to_hand()
-            loss_mask = train_batch.mask
-            #train_batch.mano_joint_3d.to(device)
-            print(train_batch.mano_joint_3d.to(device))
-            error_joints =  torch.sqrt(((joints_gt.cpu() - joints_pred.cpu())**2).sum(dim=-1)).mean(dim=-1).cpu()
-            error_joints = (torch.where(loss_mask,error_joints,torch.zeros_like(error_joints)).sum()/loss_mask.sum()).numpy()*1000
-            print("Joint error is ", error_joints)
-            print("take the id",rand_id,"as the test sample")
-            pred_list = [x_0_packed]
-            print("reach visualization here!")
-            for i in range(5):
-                pred = inference_and_visualize(denoiser_network,train_batch,device,False)
-                pred_list.append(pred)
-            visualize_joints_in_rgb(pred_list,
-                                    intrinsics=train_batch.intrinsics.squeeze(0),
-                                    rgb_frames=train_batch.rgb_frames.squeeze(0),
-                                    subseq_len = train_batch.mask.sum().cpu().numpy(),
-                                    out_dir = "tmp/visualize_hand")
+
+            pred, pred_pose_2d = inference_and_visualize(
+                denoiser_network, train_batch, device, visualized=True,
+                training_mode=args.training_mode, num_flow_steps=args.num_flow_steps,
+            )
+
+            # Build GT traj for metrics.
+            gt_traj = hand_network.HandDenoiseTraj(
+                mano_betas=train_batch.mano_betas.unsqueeze(1).expand((1, subseq_len, 10)),
+                mano_poses=train_batch.mano_pose[:, :, 3:48].reshape(1, subseq_len, 15, 3),
+                global_orientation=train_batch.mano_pose[:, :, 0:3],
+                global_translation=train_batch.mano_pose[:, :, 48:],
+                mano_side=train_batch.mano_side.unsqueeze(1).expand(1, subseq_len, -1),
+            )
+            gt_j2d = train_batch.joint_2d if hasattr(train_batch, 'joint_2d') else None
+            metrics = compute_all_metrics(
+                pred, gt_traj, pred_pose_2d,
+                train_batch.mano_joint_3d, gt_j2d,
+                train_batch.mask, device,
+            )
+            print(f"\n=== Metrics (sample {data_id}) ===")
+            for k, v in metrics.items():
+                print(f"  {k}: {v:.4f}")
+
+            # Multi-sample visualization.
+            pred_list = [gt_traj]
+            for _ in range(5):
+                p, _ = inference_and_visualize(
+                    denoiser_network, train_batch, device, visualized=False,
+                    training_mode=args.training_mode, num_flow_steps=args.num_flow_steps,
+                )
+                pred_list.append(p)
+            visualize_mesh_in_rgb(
+                pred_list,
+                intrinsics=train_batch.intrinsics.squeeze(0),
+                rgb_frames=train_batch.rgb_frames.squeeze(0),
+                subseq_len=train_batch.mask.sum().cpu().numpy(),
+                out_dir=args.out_dir,
+            )
+
         else:
-            errors={"mano_betas":0,"mano_poses":0,"global_orientation":0,"global_translation":0,"3D_joints":0,"accel_score":0}
+            # --- Quantitative evaluation ---
+            dataloader = torch.utils.data.DataLoader(
+                dataset, batch_size=256, shuffle=False, num_workers=2,
+                pin_memory=True, collate_fn=collate_dataclass, drop_last=False,
+            )
+            agg_metrics: dict[str, float] = {}
             total_size = 0
-            dataloader = torch.utils.data.DataLoader(dataset, 
-                                                    batch_size=256,
-                                                    shuffle=False,
-                                                    num_workers=2,
-                                                    pin_memory=True,
-                                                    collate_fn=collate_dataclass,
-                                                    drop_last=False)
-            var_batch = []
-            mean_batch=[]
-            gt_joints = []
-            for train_batch in dataloader:
-                total_size += train_batch.mano_betas.shape[0]
-                joints_list = []
-                for i in range(1):
-                    pred = inference_and_visualize(denoiser_network,train_batch,device,visualized)
-                    _,_,joints_pred = pred.apply_to_hand()
-                    joints_list.append(joints_pred) # BxTxJx3
-                    for j in range(train_batch.mano_joint_3d.shape[0]):
-                        gt_joints.append(joints_pred.to(device)[j].unsqueeze(0))
-                variance,mean = cal_variance(joints_list) 
-                var_batch.append(variance.cpu().numpy())
-                mean_batch.append(mean.cpu().numpy())
-                batch,seq_len,_ = train_batch.mano_pose.shape
-                loss_mask = train_batch.mask
-                x_0_packed = hand_network.HandDenoiseTraj(
-                                                            mano_betas=train_batch.mano_betas.unsqueeze(1).expand((batch, seq_len, 10)),
-                                                            mano_poses=train_batch.mano_pose[:,:,3:48].reshape(batch,seq_len,15,3),
-                                                            global_orientation=train_batch.mano_pose[:,:,0:3],
-                                                            global_translation=train_batch.mano_pose[:,:,48:],
-                                                            mano_side=train_batch.mano_side.unsqueeze(1).expand((batch, seq_len, -1)),
-                                                        )
-                _,_,joints_pred = pred.apply_to_hand()
-                for var in errors.keys():
-                    if var  != "3D_joints" and var != "accel_score":
-                        err = ((getattr(x_0_packed,var)-getattr(pred,var).cpu())**2).sum(dim=-1)
-                        if len(err.shape)>2:
-                            err = err.sum(dim=-1)
-                        errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy()
-                    else:#MPJPE & ACCEL score
-                        err = torch.sqrt(((train_batch.mano_joint_3d.to(device) - joints_pred)**2).sum(dim=-1)).mean(dim=-1).cpu()
-                        accel_gt = train_batch.mano_joint_3d.to(device)[:,2:,:]-2*train_batch.mano_joint_3d.to(device)[:,1:-1,:]+train_batch.mano_joint_3d.to(device)[:,:-2,:]
-                        accel_pred = joints_pred[:,2:,:]-2*joints_pred[:,1:-1,:]+joints_pred[:,:-2,:]
-                        accel_err = torch.sqrt(((accel_gt - accel_pred)**2).sum(dim=-1)).mean(dim=-1).cpu()
-                        errors["accel_score"]+=(torch.where(loss_mask[:,1:-1].cpu(),accel_err,torch.zeros_like(accel_err)).sum(dim=-1)/loss_mask[:,1:-1].sum(dim=-1)).sum().numpy() * 1000
-                        errors[var]+=(torch.where(loss_mask.cpu(),err,torch.zeros_like(err)).sum(dim=-1)/loss_mask.sum(dim=-1)).sum().numpy() * 1000
-            for var in errors.keys():
-                print("var: ",var," MSE error is:",errors[var]/total_size)
-            var_batch = np.stack(var_batch,axis=0) # N x J
-            mean_batch = np.stack(mean_batch,axis=0) # N x J
-            print(var_batch.shape)
-            mean_variance = np.mean(var_batch,axis=0) # J
-            final_mean = np.mean(mean_batch,axis=0) # J
-            print(mean_variance)
-            mean_variance,final_mean= cal_variance(gt_joints)
-            mean_variance = mean_variance.cpu().numpy()
-            final_mean = final_mean.cpu().numpy()
-            plot_joint_variance_curve( mean_variance)
-            plot_joint_variance_curve(final_mean, title="Joint Mean Curve", line_color='green',name='mean')
+
+            for train_batch in tqdm(dataloader, desc="Evaluating"):
+                B = train_batch.mano_betas.shape[0]
+                total_size += B
+                seq_len = train_batch.mano_pose.shape[1]
+
+                pred, pred_pose_2d = inference_and_visualize(
+                    denoiser_network, train_batch, device, visualized=False,
+                    training_mode=args.training_mode, num_flow_steps=args.num_flow_steps,
+                )
+                gt_traj = hand_network.HandDenoiseTraj(
+                    mano_betas=train_batch.mano_betas.unsqueeze(1).expand((B, seq_len, 10)),
+                    mano_poses=train_batch.mano_pose[:, :, 3:48].reshape(B, seq_len, 15, 3),
+                    global_orientation=train_batch.mano_pose[:, :, 0:3],
+                    global_translation=train_batch.mano_pose[:, :, 48:],
+                    mano_side=train_batch.mano_side.unsqueeze(1).expand((B, seq_len, -1)),
+                )
+                gt_j2d = train_batch.joint_2d if hasattr(train_batch, 'joint_2d') else None
+                batch_metrics = compute_all_metrics(
+                    pred, gt_traj, pred_pose_2d,
+                    train_batch.mano_joint_3d, gt_j2d,
+                    train_batch.mask, device,
+                )
+                for k, v in batch_metrics.items():
+                    agg_metrics[k] = agg_metrics.get(k, 0.0) + v * B
+
+            print("\n=== Evaluation Results ===")
+            for k, v in agg_metrics.items():
+                print(f"  {k}: {v / total_size:.4f}")
 
 
-def cal_variance(joints_list):
-    """joints_list: list of BxTxJx3"""
-    batch,seq_len,num_joints,_ = joints_list[0].shape
-    sample_num = len(joints_list)
-    stacked_joints = torch.stack(joints_list, dim=0).permute(3,4,1,2,0)# [J,3,B,T,S]
-    stacked_joints_var = torch.var(stacked_joints, dim=-1).reshape(num_joints,-1)  # [J,3*B*T]
-    stacked_joint_mean = torch.mean(stacked_joints.reshape(num_joints,-1), dim=-1)  # [J,3*B*T]
-    variance = stacked_joints_var.mean(dim=1)  # [J]
-    return variance,stacked_joint_mean
-    data #[N,T,J,3]
-    data_t = data[:,t,:,:] #[N,J,3]
-    mask = torch.any(data_t != 0, dim=(0, 2))  # shape: (J,), bool tensor
-    filtered_data = data_t[:, mask, :]
-
-# 过滤 data
-# filtered_data = data[:, mask, :]
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-
-def plot_joint_variance_curve( vars,
-                               #means,
-                               title="Joint Variance Curve",
-                               figsize=(12, 6),
-                               line_color='blue',
-                               joint_names=None,
-                               fill_alpha=0.2,
-                               show_std=True,
-                               name="var"):
-    """
-    绘制关节方差曲线图
-    
-    Args:
-        joints: shape=(batch, time, joint_num, 3)
-        joint_names: 关节名称列表，可选
-        title: 图表标题
-        figsize: 图表大小
-        line_color: 曲线颜色
-        fill_alpha: 填充区域的透明度
-        show_std: 是否显示标准差区域
-    """
-    joint_num = vars.shape[0]
-    # 如果没有提供关节名称，使用数字索引
-    if joint_names is None:
-        joint_names = [f"J{i}" for i in range(joint_num)]
-    
-    # 计算每个关节的方差和标准差
-    joint_variances = vars
-    # joint_std = means
-    
-    # 创建图表
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    # x轴位置
-    x_positions = np.arange(joint_num)
-    
-    # 绘制方差曲线
-    ax.plot(x_positions, joint_variances, 
-            marker='o', markersize=8, linewidth=3, 
-            color=line_color, label=name)
-    
-    #如果需要，添加标准差区域
-    # if show_std:
-    #     ax.fill_between(x_positions, 
-    #                     joint_variances - joint_std,
-    #                     joint_variances + joint_std,
-    #                     alpha=fill_alpha, color=line_color,
-    #                     label='± Std Dev')
-    
-    # 设置坐标轴
-    ax.set_xlabel('Joint Index', fontsize=12)
-    ax.set_ylabel('Value', fontsize=12)
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(joint_names, rotation=45, ha='right')
-    
-    # 添加网格
-    ax.grid(True, linestyle='--', alpha=0.5)
-    
-    # 添加图例
-    ax.legend(loc='best')
-    
-    # 在每个点上添加方差值
-    for i, v in enumerate(joint_variances):
-        if v<1e-6:
-            ax.text(i, v * 1.05, f'{v:.8f}', 
-                    ha='center', fontsize=9, fontweight='bold')
-        else:
-            ax.text(i, v * 1.001, f'{v:.8f}', 
-                    ha='center', fontsize=9, fontweight='bold')
-    
-    plt.tight_layout()
-    plt.show()
-    plt.savefig('./tmp/'+name+'.png', dpi=300, bbox_inches='tight')
-    return 0
 if __name__ == "__main__":
     import tyro
     main(tyro.cli(Args))
-    

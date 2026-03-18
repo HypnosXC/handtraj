@@ -38,6 +38,12 @@ class TrainingLossConfig:
     )
     weight_loss_by_t: Literal["emulate_eps_pred"] = "emulate_eps_pred"
     """Weights to apply to the loss at each noise level."""
+    training_mode: Literal["diffusion", "flow_matching"] = "diffusion"
+    """Training paradigm: 'diffusion' for DDPM-style, 'flow_matching' for conditional flow matching."""
+    logit_normal_mean: float = 0.0
+    """Mean of the logit-normal distribution for flow matching timestep sampling."""
+    logit_normal_std: float = 1.0
+    """Std of the logit-normal distribution for flow matching timestep sampling."""
 
 
 class TrainingLossComputer:
@@ -46,23 +52,29 @@ class TrainingLossComputer:
 
     def __init__(self, config: TrainingLossConfig, device: torch.device) -> None:
         self.config = config
-        self.noise_constants = (
-            CosineNoiseScheduleConstants.compute(timesteps=1000)
-            .to(device)
-            .map(lambda tensor: tensor.to(torch.float32))
-        )
 
-        # Emulate loss weight that would be ~equivalent to epsilon prediction.
-        #
-        # This will penalize later errors (close to the end of sampling) much
-        # more than earlier ones (at the start of sampling).
-        assert self.config.weight_loss_by_t == "emulate_eps_pred"
-        weight_t = self.noise_constants.alpha_bar_t / (
-            1 - self.noise_constants.alpha_bar_t
-        )
-        # Pad for numerical stability, and scale between [padding, 1.0].
-        padding = 0.01
-        self.weight_t = weight_t / weight_t[1] * (1.0 - padding) + padding
+        if config.training_mode == "diffusion":
+            self.noise_constants = (
+                CosineNoiseScheduleConstants.compute(timesteps=1000)
+                .to(device)
+                .map(lambda tensor: tensor.to(torch.float32))
+            )
+
+            # Emulate loss weight that would be ~equivalent to epsilon prediction.
+            #
+            # This will penalize later errors (close to the end of sampling) much
+            # more than earlier ones (at the start of sampling).
+            assert self.config.weight_loss_by_t == "emulate_eps_pred"
+            weight_t = self.noise_constants.alpha_bar_t / (
+                1 - self.noise_constants.alpha_bar_t
+            )
+            # Pad for numerical stability, and scale between [padding, 1.0].
+            padding = 0.01
+            self.weight_t = weight_t / weight_t[1] * (1.0 - padding) + padding
+        else:
+            # Flow matching uses uniform weighting; no noise schedule needed.
+            self.noise_constants = None
+            self.weight_t = None
     def compute_hand_denoising_loss(
         self,
         model: hand_network.HandDenoiser | DistributedDataParallel | OptimizedModule,
@@ -95,38 +107,40 @@ class TrainingLossComputer:
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
 
-        # Diffuse.
-        t = torch.randint(
-            low=1,
-            high=unwrapped_model.config.max_t + 1,
-            size=(batch,),
-            device=device,
-        )
+        # Forward process: diffuse or interpolate.
         eps = torch.randn(x_0_packed.shape, dtype=x_0_packed.dtype, device=device)
-        assert self.noise_constants.alpha_bar_t.shape == (
-            unwrapped_model.config.max_t + 1,
-        )
-        alpha_bar_t = self.noise_constants.alpha_bar_t[t, None, None]
-        assert alpha_bar_t.shape == (batch, 1, 1)
-        flag = torch.randint(
-            low=0,
-            high=1,
-            size=(batch,),
-            device=device,
-        )
-        x_t_packed = (
-            torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
-        )
-        # x_t_pack_half = torch.cat([x_0_packed[:, :time//2,:], x_t_packed_full[:, time//2:,:]], dim=1)
-        # x_t_pack_quart = torch.cat([x_0_packed[:, :time//4,:], x_t_packed_full[:, time//4:,:]], dim=1)
-        # mask_quart = (flag < 0.25).view(256, 1, 1)      # [256, 1, 1]
-        # mask_half  = ((flag >= 0.25) & (flag <= 0.5)).view(256, 1, 1)
-        # mask_full  = (flag > 0.5).view(256, 1, 1)
 
-        # x_t_packed = (mask_quart * x_t_pack_quart + 
-        #               mask_half  * x_t_pack_half + 
-        #               mask_full  * x_t_packed_full)
-        # # Denoise.
+        if self.config.training_mode == "flow_matching":
+            # Flow matching with logit-normal timestep sampling.
+            # Sample t ~ sigmoid(N(mean, std)), then discretize to integer for model input.
+            logit_normal_samples = torch.randn((batch,), device=device) * self.config.logit_normal_std + self.config.logit_normal_mean
+            t_frac = torch.sigmoid(logit_normal_samples)  # (batch,) in (0, 1)
+            # Discretize to integer timestep for model's noise embedding.
+            t = (t_frac * unwrapped_model.config.max_t).long().clamp(1, unwrapped_model.config.max_t)
+            t_frac_expanded = t_frac[:, None, None]  # (batch, 1, 1)
+            x_t_packed = (1.0 - t_frac_expanded) * x_0_packed + t_frac_expanded * eps
+        else:
+            # Diffusion: x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * eps
+            t = torch.randint(
+                low=1,
+                high=unwrapped_model.config.max_t + 1,
+                size=(batch,),
+                device=device,
+            )
+            assert self.noise_constants.alpha_bar_t.shape == (
+                unwrapped_model.config.max_t + 1,
+            )
+            alpha_bar_t = self.noise_constants.alpha_bar_t[t, None, None]
+            assert alpha_bar_t.shape == (batch, 1, 1)
+            x_t_packed = (
+                torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
+            )
+        # In flow matching mode, noise the GT 2D joints for the pose decoder.
+        noisy_joint_2d = None
+        if self.config.training_mode == "flow_matching" and using_img_feat and train_batch.joint_2d is not None:
+            joint_2d_eps = torch.randn_like(train_batch.joint_2d)
+            noisy_joint_2d = (1.0 - t_frac[:, None, None, None]) * train_batch.joint_2d + t_frac[:, None, None, None] * joint_2d_eps
+
         x_0_packed_pred, pose_2d, confidence = model.forward(
             x_t_packed=x_t_packed,
             t=t,
@@ -138,13 +152,18 @@ class TrainingLossComputer:
             if self.config.cond_dropout_prob > 0.0
             else None,
             conds = x_0,
-            img_feat = cond_feat
+            img_feat = cond_feat,
+            noisy_joint_2d=noisy_joint_2d,
         )
         joint_2d_conf = torch.ones_like(confidence) if confidence is not None else None
         assert isinstance(x_0_packed_pred, torch.Tensor)
         x_0_pred = hand_network.HandDenoiseTraj.unpack(x_0_packed_pred,using_mat=using_mat,mano_side=x_0.mano_side)
 
-        weight_t = self.weight_t[t].to(device)
+        if self.config.training_mode == "flow_matching":
+            # Flow matching: uniform weighting across timesteps.
+            weight_t = torch.ones((batch,), device=device)
+        else:
+            weight_t = self.weight_t[t].to(device)
         assert weight_t.shape == (batch,)
 
         def weight_and_mask_loss(
@@ -261,22 +280,30 @@ class TrainingLossComputer:
         device = x_0_packed.device
         assert x_0_packed.shape == (batch, time, unwrapped_model.get_d_state())
 
-        # Diffuse.
-        t = torch.randint(
-            low=1,
-            high=unwrapped_model.config.max_t + 1,
-            size=(batch,),
-            device=device,
-        )
+        # Forward process: diffuse or interpolate.
         eps = torch.randn(x_0_packed.shape, dtype=x_0_packed.dtype, device=device)
-        assert self.noise_constants.alpha_bar_t.shape == (
-            unwrapped_model.config.max_t + 1,
-        )
-        alpha_bar_t = self.noise_constants.alpha_bar_t[t, None, None]
-        assert alpha_bar_t.shape == (batch, 1, 1)
-        x_t_packed = (
-            torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
-        )
+
+        if self.config.training_mode == "flow_matching":
+            logit_normal_samples = torch.randn((batch,), device=device) * self.config.logit_normal_std + self.config.logit_normal_mean
+            t_frac = torch.sigmoid(logit_normal_samples)
+            t = (t_frac * unwrapped_model.config.max_t).long().clamp(1, unwrapped_model.config.max_t)
+            t_frac_expanded = t_frac[:, None, None]
+            x_t_packed = (1.0 - t_frac_expanded) * x_0_packed + t_frac_expanded * eps
+        else:
+            t = torch.randint(
+                low=1,
+                high=unwrapped_model.config.max_t + 1,
+                size=(batch,),
+                device=device,
+            )
+            assert self.noise_constants.alpha_bar_t.shape == (
+                unwrapped_model.config.max_t + 1,
+            )
+            alpha_bar_t = self.noise_constants.alpha_bar_t[t, None, None]
+            assert alpha_bar_t.shape == (batch, 1, 1)
+            x_t_packed = (
+                torch.sqrt(alpha_bar_t) * x_0_packed + torch.sqrt(1.0 - alpha_bar_t) * eps
+            )
 
         hand_positions_wrt_cpf: Tensor | None = None
         if unwrapped_model.config.include_hand_positions_cond:
@@ -317,7 +344,10 @@ class TrainingLossComputer:
             x_0_packed_pred, include_hands=unwrapped_model.config.include_hands
         )
 
-        weight_t = self.weight_t[t].to(device)
+        if self.config.training_mode == "flow_matching":
+            weight_t = torch.ones((batch,), device=device)
+        else:
+            weight_t = self.weight_t[t].to(device)
         assert weight_t.shape == (batch,)
 
         def weight_and_mask_loss(

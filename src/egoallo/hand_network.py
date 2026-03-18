@@ -499,6 +499,7 @@ class HandDenoiser(nn.Module):
         # Mask for when to drop out / keep conditioning information.
         cond_dropout_keep_mask: Bool[Tensor, "batch"] | None = None,
         conds: None,
+        noisy_joint_2d: Float[Tensor, "batch time num_joints 2"] | None = None,
     ) -> Float[Tensor, "batch time state_dim"]:
         """Predict a denoised trajectory. Note that `t` refers to a noise
         level, not a timestep."""
@@ -538,8 +539,9 @@ class HandDenoiser(nn.Module):
         if config.using_img_feat:
             if config.predict_2Dpose:
                 # pose_2d, pose_2d_conf, joint_feat,
-                pose_2d, confidence, joint_feat, global_img_feat = ( self.pose2d_decoder(img_feat.float())
-                                                                 )
+                pose_2d, confidence, joint_feat, global_img_feat = self.pose2d_decoder(
+                    img_feat.float(), noisy_joint_2d=noisy_joint_2d
+                )
                 flat_joint_feat = joint_feat.reshape(batch, time, -1)
                 joint_feat_flat = self.pose2d_feat_proj(flat_joint_feat)
                 cond = torch.cat((cond,global_img_feat,joint_feat_flat),dim=-1)
