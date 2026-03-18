@@ -1,0 +1,62 @@
+experiment_name: hand_motion_prior_flow
+
+model:
+  max_t: 1000
+  fourier_enc_freqs: 3
+  d_latent: 512
+  d_feedforward: 2048
+  d_noise_emb: 1024
+  num_heads: 4
+  encoder_layers: 6
+  decoder_layers: 6
+  dropout_p: 0.2
+  using_mat: true
+  using_img_feat: true
+  predict_2Dpose: true
+  activation: gelu
+  positional_encoding: rope
+  noise_conditioning: token
+  cond_param: only_side
+  # 2D pose branch
+  pose2d_patch_feat_channels: 768
+  pose2d_latent_channels: 8
+  pose2d_d_latent: 256
+  pose2d_num_joints: 21
+  pose2d_num_layers: 4
+  pose2d_num_heads: 8
+  pose2d_d_feedforward: 1024
+  pose2d_global_feat_dim: 128
+
+loss:
+  training_mode: diffusion  # 'diffusion' or 'flow_matching'
+  logit_normal_mean: 0.0    # mean of logit-normal t sampling (flow_matching only)
+  logit_normal_std: 1.0     # std of logit-normal t sampling (flow_matching only)
+  cond_dropout_prob: 0.0
+  weight_loss_by_t: emulate_eps_pred
+  loss_weights:
+    betas: 0.1
+    body_rotmats: 1.0
+    contacts: 0.1
+    hand_rotmats: 0.01
+    mano_betas: 0.1
+    mano_poses: 1.0
+    mano_poses_mat: 1.0
+    mano_side: 1.0
+    global_ori_mat: 1.0
+    global_translation: 1.0
+    joint_2d: 1.0
+    joint_2d_conf: 1.0
+
+# Dataset
+dataset_name: all
+use_feature: visual_token
+batch_size: 256
+num_workers: 2
+subseq_len: 128
+
+# Optimizer
+learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+warmup_steps: 1000
+max_grad_norm: 1.0
+seed: 42

@@ -1,1 +1,3 @@
 accelerate launch --num_processes 8 --num_machines 1 train_hand_motion_prior.py --config.experiment-name 2d_decoder --config.batch_size 256
+
+python train_hand_motion_prior.py --config.experiment-name handtry --config.batch_size 8
