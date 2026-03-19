@@ -195,10 +195,12 @@ class Pose2DTransformerDecoder(nn.Module):
         global_feat = global_feat.reshape(batch, time, self.global_feat_dim)
         queries = self.joint_queries.expand(batch * time, -1, -1)
 
-        # In flow matching mode, condition queries on noisy 2D joints.
-        if noisy_joint_2d is not None:
-            noisy_flat = noisy_joint_2d.reshape(batch * time, self.num_joints, 2)
-            queries = queries + self.noisy_joint_proj(noisy_flat)
+        # Condition queries on noisy 2D joints (zeros when not in flow matching mode
+        # to keep noisy_joint_proj parameters in the computation graph for DDP).
+        if noisy_joint_2d is None:
+            noisy_joint_2d = torch.zeros(batch, time, self.num_joints, 2, device=queries.device)
+        noisy_flat = noisy_joint_2d.reshape(batch * time, self.num_joints, 2)
+        queries = queries + self.noisy_joint_proj(noisy_flat)
 
         # Condition on noise level / timestep embedding.
         if cond is not None:
