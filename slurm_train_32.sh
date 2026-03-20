@@ -13,6 +13,7 @@
 
 ulimit -l unlimited
 ulimit -s unlimited
+ulimit -n 65536
 
 # -------------------------------
 # 1. Environment

@@ -737,9 +737,10 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     #     iio.imwrite(os.path.join(out_dir, f"hamer_output_{sample_index}.mp4"), hamer_out_frams, fps=30, macro_block_size=None)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=16)
 def _load_npy_mmap(npy_path: str) -> np.ndarray:
-    """Module-level LRU-cached mmap loader (picklable for DataLoader workers)."""
+    """Module-level LRU-cached mmap loader (picklable for DataLoader workers).
+    maxsize=16 to limit open file descriptors (16 × num_workers)."""
     return np.load(npy_path, mmap_mode='r')
 
 
@@ -748,47 +749,60 @@ from torch.utils.data import ConcatDataset
 
 class FeatureOnlyDataset(torch.utils.data.Dataset):
     """Lightweight dataset that only loads visual features + returns sample index.
-    Used with GPU-cached small fields to eliminate all CPU→GPU transfer except features."""
+    Stores only plain Python data (no torch tensors, no HDF5 handles) so workers
+    can be spawned without serializing large objects or exhausting file descriptors."""
 
     def __init__(self, parent_dataset: "HandHdf5Dataset") -> None:
-        self.parent = parent_dataset
-
-    def __len__(self) -> int:
-        return len(self.parent)
-
-    def __getitem__(self, index: int) -> tuple[int, torch.Tensor]:
-        # Route to the correct sub-dataset to load only img_feature.
-        offset = 0
-        for ds in self.parent.dataset.datasets:
-            if index - offset < len(ds):
-                local_idx = index - offset
-                group_name, start_idx, after_len, ori_len = ds._mapping[local_idx]
+        # Flatten all sub-datasets into a single list of lightweight entries.
+        self._entries: list[dict] = []
+        for ds in parent_dataset.dataset.datasets:
+            for group_name, start_idx, after_len, ori_len in ds._mapping:
                 clip_len = min(ds._subseq_len, after_len) if ds._subseq_len > 0 else after_len
                 pad_len = ds._subseq_len - clip_len if ds._subseq_len > 0 else 0
+                self._entries.append({
+                    "group_name": group_name,
+                    "start_idx": start_idx,
+                    "clip_len": clip_len,
+                    "pad_len": pad_len,
+                    "use_token": ds.use_token,
+                    "use_npy": ds._use_npy_features,
+                    "npy_dir": ds._feature_npy_dir,
+                    "hdf5_path": ds._feature_hdf5,
+                })
+        self._feature_archive: h5py.File | None = None
+        self._cur_hdf5_path: str | None = None
 
-                if ds.use_token == "visual_token":
-                    if ds._use_npy_features:
-                        npy_path = os.path.join(ds._feature_npy_dir, f"{group_name}.npy")
-                        feat = _load_npy_mmap(npy_path)
-                        img_feat = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
-                    else:
-                        if ds.feature_archive is None:
-                            ds.feature_archive = h5py.File(ds._feature_hdf5, 'r', swmr=True, libver='latest')
-                        img_feat = torch.from_numpy(ds.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len])
-                    if pad_len > 0:
-                        img_feat = torch.cat([img_feat, torch.zeros((pad_len, *img_feat.shape[1:]), dtype=img_feat.dtype)], dim=0)
-                elif ds.use_token == "cls_token":
-                    if ds.feature_archive is None:
-                        ds.feature_archive = h5py.File(ds._feature_hdf5, 'r', swmr=True, libver='latest')
-                    img_feat = torch.from_numpy(ds.feature_archive[group_name]["cls_token"][start_idx:start_idx+clip_len])
-                    if pad_len > 0:
-                        img_feat = torch.cat([img_feat, torch.zeros((pad_len, img_feat.shape[1]))], dim=0)
-                else:
-                    img_feat = torch.zeros((1, 768))
+    def __len__(self) -> int:
+        return len(self._entries)
 
-                return index, img_feat
-            offset += len(ds)
-        raise IndexError(f"Index {index} out of range")
+    def __getitem__(self, index: int) -> tuple[int, torch.Tensor]:
+        e = self._entries[index]
+        group_name = e["group_name"]
+        start_idx, clip_len, pad_len = e["start_idx"], e["clip_len"], e["pad_len"]
+
+        if e["use_token"] == "visual_token":
+            if e["use_npy"]:
+                npy_path = os.path.join(e["npy_dir"], f"{group_name}.npy")
+                feat = _load_npy_mmap(npy_path)
+                img_feat = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
+            else:
+                if self._feature_archive is None or self._cur_hdf5_path != e["hdf5_path"]:
+                    self._feature_archive = h5py.File(e["hdf5_path"], 'r', swmr=True, libver='latest')
+                    self._cur_hdf5_path = e["hdf5_path"]
+                img_feat = torch.from_numpy(self._feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len])
+            if pad_len > 0:
+                img_feat = torch.cat([img_feat, torch.zeros((pad_len, *img_feat.shape[1:]), dtype=img_feat.dtype)], dim=0)
+        elif e["use_token"] == "cls_token":
+            if self._feature_archive is None or self._cur_hdf5_path != e["hdf5_path"]:
+                self._feature_archive = h5py.File(e["hdf5_path"], 'r', swmr=True, libver='latest')
+                self._cur_hdf5_path = e["hdf5_path"]
+            img_feat = torch.from_numpy(self._feature_archive[group_name]["cls_token"][start_idx:start_idx+clip_len])
+            if pad_len > 0:
+                img_feat = torch.cat([img_feat, torch.zeros((pad_len, img_feat.shape[1]))], dim=0)
+        else:
+            img_feat = torch.zeros((1, 768))
+
+        return index, img_feat
 
 
 class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
