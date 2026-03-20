@@ -3,7 +3,7 @@
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:8
-#SBATCH --mem=480G
+#SBATCH --mem=0
 #SBATCH --time=72:00:00
 #SBATCH --partition=gpu
 #SBATCH --job-name=handgen

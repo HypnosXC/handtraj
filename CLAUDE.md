@@ -11,8 +11,6 @@ cd handtraj
 conda activate handtraj
 git pull origin
 ```
-
-this server probably does not have gpu hence you should sbatch your scripts.
 you should check by nvidia-smi.
 if gpus are available, you are free to use.
 

@@ -1,14 +1,15 @@
 #!/bin/bash
 
-#SBATCH --job-name=handgen_16gpu
+#SBATCH --job-name=handgen_32gpu
 #SBATCH --partition=gpu
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
 #SBATCH --nodes=2
+#SBATCH --mem=0
 #SBATCH --ntasks-per-node=1       # 1 task per node; accelerate handles GPU processes
 #SBATCH --gres=gpu:8              # 8 GPUs per node
 #SBATCH --cpus-per-task=64        # all CPUs on the node available to accelerate's 8 workers
-#SBATCH --time=72:00:00
+#SBATCH --time=96:00:00
 
 ulimit -l unlimited
 ulimit -s unlimited
@@ -45,17 +46,17 @@ export NCCL_NET_GDR_LEVEL=5
 # -------------------------------
 # 4. Activate env
 # -------------------------------
-source activate handtraj
+srun bash -c 'echo "hostname=$(hostname) SLURM_NODEID=$SLURM_NODEID MASTER_ADDR='"$MASTER_ADDR"'"'
 
 # -------------------------------
 # 5. Launch training (2 nodes x 8 GPUs = 16 processes)
 # -------------------------------
-srun accelerate launch \
+srun bash -c 'accelerate launch \
     --num_processes 16 \
     --num_machines 2 \
     --machine_rank $SLURM_NODEID \
-    --main_process_ip $MASTER_ADDR \
-    --main_process_port $MASTER_PORT \
+    --main_process_ip '"$MASTER_ADDR"' \
+    --main_process_port '"$MASTER_PORT"' \
     --multi_gpu \
     train_hand_motion_prior.py \
-        --config configs/hand_motion_prior_flow_matching.yaml
+        --config configs/hand_motion_prior_flow_matching.yaml'
