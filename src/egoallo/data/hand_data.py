@@ -180,10 +180,6 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # Per-group .npy dir (float16, much faster I/O than HDF5).
         self._feature_npy_dir = os.path.join(feat_root + "_npy", f"{self.dataset_name}_{self.split}")
         self._use_npy_features = os.path.isdir(self._feature_npy_dir)
-        # Per-worker LRU cache for mmap handles — same group is accessed many
-        # times per epoch (different start_idx), so caching the mmap avoids
-        # repeated file opens and keeps pages in OS cache.
-        self._mmap_cache = lru_cache(maxsize=64)(self._load_npy_mmap)
           
         # self.img_feat_root = os.path.join(img_feat_root[dataset_name], split)
         self.dataset_name = dataset_name
@@ -238,10 +234,6 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self._group_cache: dict[str, dict] = {}
         self._preload_group_cache()
         
-    @staticmethod
-    def _load_npy_mmap(npy_path: str) -> np.ndarray:
-        """Load a .npy file as a read-only memory-mapped array."""
-        return np.load(npy_path, mmap_mode='r')
 
     def _preload_group_cache(self) -> None:
         """Preload ALL per-group data (poses, joints, metadata) into CPU memory.
@@ -431,7 +423,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 # Same group is accessed many times per epoch (different start_idx),
                 # so the mmap handle + OS page cache make subsequent reads near-free.
                 npy_path = os.path.join(self._feature_npy_dir, f"{group_name}.npy")
-                feat = self._mmap_cache(npy_path)
+                feat = _load_npy_mmap(npy_path)
                 # Keep float16 through dataloader; model's .float() converts on GPU.
                 kwargs['img_feature'] = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
             else:
@@ -745,6 +737,12 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
     #     iio.imwrite(os.path.join(out_dir, f"hamer_output_{sample_index}.mp4"), hamer_out_frams, fps=30, macro_block_size=None)
 
 
+@lru_cache(maxsize=128)
+def _load_npy_mmap(npy_path: str) -> np.ndarray:
+    """Module-level LRU-cached mmap loader (picklable for DataLoader workers)."""
+    return np.load(npy_path, mmap_mode='r')
+
+
 from torch.utils.data import ConcatDataset
 
 
@@ -771,7 +769,7 @@ class FeatureOnlyDataset(torch.utils.data.Dataset):
                 if ds.use_token == "visual_token":
                     if ds._use_npy_features:
                         npy_path = os.path.join(ds._feature_npy_dir, f"{group_name}.npy")
-                        feat = ds._mmap_cache(npy_path)
+                        feat = _load_npy_mmap(npy_path)
                         img_feat = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
                     else:
                         if ds.feature_archive is None:
