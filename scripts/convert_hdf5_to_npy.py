@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--feat_root", type=str,
                         default="/public/home/annie/preprocessed/dino_feats")
     parser.add_argument("--out_root", type=str,
-                        default="/public/home/annie/preprocessed/dino_feats_npy")
+                        default="/public/home/xuchen/preprocessed/dino_feats_npy")
     parser.add_argument("--datasets", nargs="+",
                         default=["dexycb", "interhand26m", "arctic", "ho3d"])
     parser.add_argument("--splits", nargs="+", default=["train", "test"])
