@@ -32,7 +32,8 @@ class HandTrainConfig:
     # Dataset arguments.
     batch_size: int = 256
     """Effective batch size per GPU."""
-    num_workers: int = 2
+    num_workers: int = 8
+    prefetch_factor: int = 4
     subseq_len: int = 128
     dataset_slice_strategy: Literal[
         "deterministic", "random_uniform_len", "random_variable_len"
@@ -167,6 +168,7 @@ def run_training(
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
         pin_memory=True,
+        prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
         collate_fn=collate_dataclass,
         drop_last=True,
     )

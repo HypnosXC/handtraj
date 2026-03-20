@@ -177,6 +177,9 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             raise ValueError("dataset_name should be dexycb, interhand26m, arctic or ho3d")
 
         self._feature_hdf5 = os.path.join(feat_root, f"{self.dataset_name}_{self.split}_dino_fpn.hdf5")
+        # Per-group .npy dir (float16, much faster I/O than HDF5).
+        self._feature_npy_dir = os.path.join(feat_root + "_npy", f"{self.dataset_name}_{self.split}")
+        self._use_npy_features = os.path.isdir(self._feature_npy_dir)
           
         # self.img_feat_root = os.path.join(img_feat_root[dataset_name], split)
         self.dataset_name = dataset_name
@@ -226,7 +229,28 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         )
         self.archive: h5py.File | None = None
         self.feature_archive: h5py.File | None = None
+
+        # Preload small per-group metadata into memory to avoid repeated HDF5 reads.
+        self._group_cache: dict[str, dict] = {}
+        self._preload_group_cache()
         
+    def _preload_group_cache(self) -> None:
+        """Preload small per-group metadata (betas, side, extrinsics, video_name,
+        intrinsics) into CPU memory so __getitem__ only reads large arrays
+        (mano_poses, mano_joint_3d, visual features) from HDF5."""
+        archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
+        group_names = set(m[0] for m in self._mapping)
+        for gn in group_names:
+            ds = archive[gn]
+            self._group_cache[gn] = {
+                "mano_betas": torch.from_numpy(ds['mano_betas'][:]),
+                "extrinsics": torch.from_numpy(ds['extrinsics'][:]),
+                "mano_side": 0 if ds['mano_side'][()].decode('utf-8') == 'left' else 1,
+                "video_name": ds['video_name'][()].decode('utf-8'),
+                "intrinsics": torch.from_numpy(ds['intrinsics'][:]),
+            }
+        archive.close()
+
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
         if self.use_token is not None and self.feature_archive is None:
             self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
@@ -245,16 +269,15 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             clip_len = min(int(self._subseq_len * speed_factor), after_len)
 
-
+        # Use cached small metadata instead of reading from HDF5.
+        cached = self._group_cache[group_name]
         dataset = self.archive[group_name]
-        kwargs["mano_betas"] = torch.from_numpy(dataset['mano_betas'][:])
+        kwargs["mano_betas"] = cached["mano_betas"].clone()
         kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][start_idx:start_idx+clip_len,0])
-        kwargs["extrinsics"] =torch.from_numpy(dataset['extrinsics'][:])
-            
+        kwargs["extrinsics"] = cached["extrinsics"].clone()
+
         kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
-        # if self.dataset_name=="arctic":
-        #     kwargs["mano_joint_3d"] = kwargs["mano_joint_3d"] / 1000  # Convert to meters
-        if dataset['mano_side'][()].decode('utf-8') == 'left':
+        if cached["mano_side"] == 0:
             kwargs["mano_side"] = torch.zeros(1)
         else:
             kwargs["mano_side"] = torch.ones(1)
@@ -320,7 +343,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             pad_len = self._subseq_len - clip_len
 
-        kwargs["intrinsics"]= torch.from_numpy(dataset['intrinsics'][:])
+        kwargs["intrinsics"] = cached["intrinsics"].clone()
         if len(kwargs["intrinsics"].shape) == 1:
             if self._subseq_len !=-1: 
                 kwargs["intrinsics"] = kwargs["intrinsics"].unsqueeze(0).expand(self._subseq_len, -1)
@@ -339,7 +362,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_pose"] = torch.cat([kwargs["mano_pose"], torch.zeros((pad_len, *kwargs["mano_pose"].shape[1:]))], dim=0)
             kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
             kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
-        video_name = dataset['video_name'][()].decode('utf-8')
+        video_name = cached["video_name"]
         # kwargs['video_name'] = video_name
         if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
             print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
@@ -394,11 +417,15 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                 if pad_len > 0:
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
         elif self.use_token == "visual_token":
-            # assert self.feature_archive[group_name]["layer_11"].shape[0] == dataset['mano_poses'].shape[0], f"Feature length mismatch: {self.feature_archive[group_name]['layer_11'].shape[0]} vs {dataset['mano_poses'].shape[0]}"
-            assert self.feature_archive[group_name]["layer_11"].shape[0] == ori_len, f"Feature length mismatch: index{i}, dataset_name{self.dataset_name}, {self.feature_archive[group_name]['layer_11'].shape[0]} vs {after_len}"
-            # if self.feature_archive[group_name]["layer_11"].shape[0] != dataset['mano_poses'].shape[0]:
-            #     breakpoint()
-            kwargs['img_feature'] = torch.from_numpy(self.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len]) # T,768,16,16
+            if self._use_npy_features:
+                # Fast path: per-group .npy files (float16, no HDF5 lock contention).
+                npy_path = os.path.join(self._feature_npy_dir, f"{group_name}.npy")
+                feat = np.load(npy_path, mmap_mode='r')  # memory-mapped, zero-copy
+                kwargs['img_feature'] = torch.from_numpy(feat[start_idx:start_idx+clip_len].astype(np.float32))
+            else:
+                # Fallback: HDF5 (slower with multiple workers).
+                assert self.feature_archive[group_name]["layer_11"].shape[0] == ori_len, f"Feature length mismatch: index{index}, dataset_name{self.dataset_name}, {self.feature_archive[group_name]['layer_11'].shape[0]} vs {after_len}"
+                kwargs['img_feature'] = torch.from_numpy(self.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len]) # T,768,16,16
             if self._subseq_len != -1:
                 if pad_len > 0:
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1], kwargs['img_feature'].shape[2], kwargs['img_feature'].shape[3]))], dim=0)
