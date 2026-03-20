@@ -1,5 +1,5 @@
 import sys
-
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -180,6 +180,10 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         # Per-group .npy dir (float16, much faster I/O than HDF5).
         self._feature_npy_dir = os.path.join(feat_root + "_npy", f"{self.dataset_name}_{self.split}")
         self._use_npy_features = os.path.isdir(self._feature_npy_dir)
+        # Per-worker LRU cache for mmap handles — same group is accessed many
+        # times per epoch (different start_idx), so caching the mmap avoids
+        # repeated file opens and keeps pages in OS cache.
+        self._mmap_cache = lru_cache(maxsize=64)(self._load_npy_mmap)
           
         # self.img_feat_root = os.path.join(img_feat_root[dataset_name], split)
         self.dataset_name = dataset_name
@@ -234,6 +238,11 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         self._group_cache: dict[str, dict] = {}
         self._preload_group_cache()
         
+    @staticmethod
+    def _load_npy_mmap(npy_path: str) -> np.ndarray:
+        """Load a .npy file as a read-only memory-mapped array."""
+        return np.load(npy_path, mmap_mode='r')
+
     def _preload_group_cache(self) -> None:
         """Preload small per-group metadata (betas, side, extrinsics, video_name,
         intrinsics) into CPU memory so __getitem__ only reads large arrays
@@ -418,17 +427,20 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
                     kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1]))], dim=0)
         elif self.use_token == "visual_token":
             if self._use_npy_features:
-                # Fast path: per-group .npy files (float16, no HDF5 lock contention).
+                # Fast path: LRU-cached mmap per group (float16).
+                # Same group is accessed many times per epoch (different start_idx),
+                # so the mmap handle + OS page cache make subsequent reads near-free.
                 npy_path = os.path.join(self._feature_npy_dir, f"{group_name}.npy")
-                feat = np.load(npy_path, mmap_mode='r')  # memory-mapped, zero-copy
-                kwargs['img_feature'] = torch.from_numpy(feat[start_idx:start_idx+clip_len].astype(np.float32))
+                feat = self._mmap_cache(npy_path)
+                # Keep float16 through dataloader; model's .float() converts on GPU.
+                kwargs['img_feature'] = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
             else:
                 # Fallback: HDF5 (slower with multiple workers).
                 assert self.feature_archive[group_name]["layer_11"].shape[0] == ori_len, f"Feature length mismatch: index{index}, dataset_name{self.dataset_name}, {self.feature_archive[group_name]['layer_11'].shape[0]} vs {after_len}"
                 kwargs['img_feature'] = torch.from_numpy(self.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len]) # T,768,16,16
             if self._subseq_len != -1:
                 if pad_len > 0:
-                    kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1], kwargs['img_feature'].shape[2], kwargs['img_feature'].shape[3]))], dim=0)
+                    kwargs['img_feature'] = torch.cat([kwargs['img_feature'], torch.zeros((pad_len, kwargs['img_feature'].shape[1], kwargs['img_feature'].shape[2], kwargs['img_feature'].shape[3]), dtype=kwargs['img_feature'].dtype)], dim=0)
         joints_3d = kwargs["mano_joint_3d"]   # (T, 21, 3)
         intr = kwargs["intrinsics"]           # (T, 4)
         mask = kwargs["mask"]                 # (T,)
