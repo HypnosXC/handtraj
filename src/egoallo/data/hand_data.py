@@ -248,7 +248,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         After this, __getitem__ only reads visual features from disk."""
         archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         group_names = set(m[0] for m in self._mapping)
-        for gn in group_names:
+        for gn in tqdm(group_names, desc=f"Preloading {self.dataset_name}/{self.split}"):
             ds = archive[gn]
             video_name = ds['video_name'][()].decode('utf-8')
             video_path = os.path.join(self.video_root, self.split, video_name)
@@ -496,7 +496,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             "img_shape": torch.zeros(N, 2),
         }
 
-        for i in range(N):
+        for i in tqdm(range(N), desc=f"Building GPU cache ({self.dataset_name}/{self.split})"):
             group_name, start_idx, after_len, ori_len = self._mapping[i]
             clip_len = min(T, after_len)
             cached = self._group_cache[group_name]
