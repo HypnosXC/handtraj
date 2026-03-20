@@ -48,9 +48,9 @@ loss:
     joint_2d_conf: 1.0
 
 # Dataset
-dataset_name: all
+dataset_name: arctic
 use_feature: visual_token
-batch_size: 8
+batch_size: 256
 num_workers: 2
 subseq_len: 128
 
