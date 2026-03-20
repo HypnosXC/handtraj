@@ -244,29 +244,35 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         return np.load(npy_path, mmap_mode='r')
 
     def _preload_group_cache(self) -> None:
-        """Preload small per-group metadata (betas, side, extrinsics, video_name,
-        intrinsics) into CPU memory so __getitem__ only reads large arrays
-        (mano_poses, mano_joint_3d, visual features) from HDF5."""
+        """Preload ALL per-group data (poses, joints, metadata) into CPU memory.
+        After this, __getitem__ only reads visual features from disk."""
         archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         group_names = set(m[0] for m in self._mapping)
         for gn in group_names:
             ds = archive[gn]
+            video_name = ds['video_name'][()].decode('utf-8')
+            video_path = os.path.join(self.video_root, self.split, video_name)
+            if os.path.exists(video_path):
+                props = iio.improps(video_path, plugin="pyav")
+                img_shape = (int(props.shape[1]), int(props.shape[2]))  # (h, w)
+            else:
+                img_shape = (256, 256)
             self._group_cache[gn] = {
                 "mano_betas": torch.from_numpy(ds['mano_betas'][:]),
+                "mano_poses": torch.from_numpy(ds['mano_poses'][:, 0]),  # (T, 51)
+                "mano_joint_3d": torch.from_numpy(ds['mano_joint_3d'][:, 0]),  # (T, 21, 3)
                 "extrinsics": torch.from_numpy(ds['extrinsics'][:]),
                 "mano_side": 0 if ds['mano_side'][()].decode('utf-8') == 'left' else 1,
-                "video_name": ds['video_name'][()].decode('utf-8'),
+                "video_name": video_name,
                 "intrinsics": torch.from_numpy(ds['intrinsics'][:]),
+                "img_shape": img_shape,
             }
         archive.close()
 
     def __getitem__(self, index: int,resize=(512,512)) -> HandTrainingData:
-        if self.use_token is not None and self.feature_archive is None:
+        if self.use_token is not None and self.feature_archive is None and not self._use_npy_features:
             self.feature_archive = h5py.File(self._feature_hdf5, 'r', swmr=True, libver='latest')
-        if self.archive is None:
-            self.archive = h5py.File(self._hdf5_path, 'r', swmr=True, libver='latest')
         kwargs: dict[str, Any] = {}
-        # group_name, start_idx, clip_len = self._mapping[index]
         group_name, start_idx, after_len, ori_len = self._mapping[index]
         if self.augment['speed'] is not None:
             speed_aug = self.augment['speed']
@@ -278,14 +284,12 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         else:
             clip_len = min(int(self._subseq_len * speed_factor), after_len)
 
-        # Use cached small metadata instead of reading from HDF5.
+        # All data from CPU memory cache — no HDF5 reads for poses/joints.
         cached = self._group_cache[group_name]
-        dataset = self.archive[group_name]
         kwargs["mano_betas"] = cached["mano_betas"].clone()
-        kwargs["mano_pose"]=torch.from_numpy(dataset['mano_poses'][start_idx:start_idx+clip_len,0])
+        kwargs["mano_pose"] = cached["mano_poses"][start_idx:start_idx+clip_len].clone()
         kwargs["extrinsics"] = cached["extrinsics"].clone()
-
-        kwargs["mano_joint_3d"] = torch.from_numpy(dataset['mano_joint_3d'][start_idx:start_idx+clip_len,0])
+        kwargs["mano_joint_3d"] = cached["mano_joint_3d"][start_idx:start_idx+clip_len].clone()
         if cached["mano_side"] == 0:
             kwargs["mano_side"] = torch.zeros(1)
         else:
@@ -372,11 +376,7 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
             kwargs["mano_joint_3d"] = torch.cat([kwargs["mano_joint_3d"], torch.zeros((pad_len, *kwargs["mano_joint_3d"].shape[1:]))], dim=0)
             kwargs['mask'] = torch.cat([kwargs['mask'], torch.zeros((pad_len), dtype=torch.bool)], dim=0)
         video_name = cached["video_name"]
-        # kwargs['video_name'] = video_name
-        if not os.path.exists(os.path.join(self.video_root, self.split, video_name)):
-            print(f"Video not found: {os.path.join(self.video_root, self.split, video_name)}")
-        image_width = 256
-        image_height = 256
+        image_height, image_width = cached["img_shape"]
         video_path = os.path.join(self.video_root, self.split, video_name)
         if self.vis:
             reader = iio.imread(video_path)
@@ -457,20 +457,75 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
         #     kwargs['img_shape'] = (480,640)
         # else:
         #     kwargs['img_shape'] = (512, 344)
-        props = iio.improps(video_path, plugin="pyav") # 明确指定插件更稳定
-                
-        # imageio 的 shape 通常是 (num_frames, height, width, channels)
-        # 或者直接从 metadata 字典中获取
-        # width = metadata.get('width')
-        # height = metadata.get('height')
-        # kwargs['img_shape'] = props.shape[1:3]
-        kwargs['img_shape'] = torch.tensor([props.shape[1], props.shape[2]])  # (h, w)
+        kwargs['img_shape'] = torch.tensor([image_height, image_width])  # (h, w)
         return HandTrainingData(**kwargs)
     def __len__(self) -> int:
         return self.N
 
     def get_mapping(self):
         return self._mapping
+
+    def build_gpu_cache(self, device: torch.device) -> dict[str, torch.Tensor]:
+        """Precompute ALL small fields for every sample and store on GPU.
+
+        Returns a dict of tensors indexed by sample index:
+            mano_betas:    (N, 10)
+            mano_pose:     (N, subseq_len, 51)
+            mano_joint_3d: (N, subseq_len, 21, 3)
+            joint_2d:      (N, subseq_len, 21, 2)
+            intrinsics:    (N, subseq_len, 4)
+            mask:          (N, subseq_len)
+            mano_side:     (N, 1)
+            img_shape:     (N, 2)
+        """
+        from .data_util import project_3d_to_2d, normalize_2d_keypoints
+        N = len(self)
+        T = self._subseq_len
+        assert T > 0, "build_gpu_cache requires fixed subseq_len"
+
+        # Allocate CPU buffers, fill, then move to GPU once.
+        buf = {
+            "mano_betas": torch.zeros(N, 10),
+            "mano_pose": torch.zeros(N, T, 51),
+            "mano_joint_3d": torch.zeros(N, T, 21, 3),
+            "joint_2d": torch.zeros(N, T, 21, 2),
+            "intrinsics": torch.zeros(N, T, 4),
+            "mask": torch.zeros(N, T, dtype=torch.bool),
+            "mano_side": torch.zeros(N, 1),
+            "extrinsics": torch.zeros(N, 3, 4),
+            "img_shape": torch.zeros(N, 2),
+        }
+
+        for i in range(N):
+            group_name, start_idx, after_len, ori_len = self._mapping[i]
+            clip_len = min(T, after_len)
+            cached = self._group_cache[group_name]
+            image_height, image_width = cached["img_shape"]
+
+            buf["mano_betas"][i] = cached["mano_betas"]
+            buf["mano_pose"][i, :clip_len] = cached["mano_poses"][start_idx:start_idx+clip_len]
+            buf["mano_joint_3d"][i, :clip_len] = cached["mano_joint_3d"][start_idx:start_idx+clip_len]
+            buf["extrinsics"][i] = cached["extrinsics"]
+            buf["mano_side"][i] = float(cached["mano_side"])
+            buf["mask"][i, :clip_len] = True
+            buf["img_shape"][i] = torch.tensor([image_height, image_width])
+
+            intr = cached["intrinsics"].clone()
+            if len(intr.shape) == 1:
+                buf["intrinsics"][i] = intr.unsqueeze(0).expand(T, -1)
+            else:
+                buf["intrinsics"][i, :clip_len] = intr[start_idx:start_idx+clip_len]
+
+            # 2D joint projection
+            joints_3d = buf["mano_joint_3d"][i]  # (T, 21, 3)
+            intr_t = buf["intrinsics"][i]         # (T, 4)
+            j2d = project_3d_to_2d(joints_3d, intr_t)
+            j2d = normalize_2d_keypoints(j2d, image_height, image_width)
+            j2d[~buf["mask"][i]] = 0.0
+            buf["joint_2d"][i] = j2d
+
+        # Move everything to GPU in one shot.
+        return {k: v.to(device) for k, v in buf.items()}
 
     def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,from_mano=False) -> None:
         os.makedirs(out_dir, exist_ok=True)
@@ -692,6 +747,52 @@ class HandHdf5EachDataset(torch.utils.data.Dataset[HandTrainingData]):
 
 from torch.utils.data import ConcatDataset
 
+
+class FeatureOnlyDataset(torch.utils.data.Dataset):
+    """Lightweight dataset that only loads visual features + returns sample index.
+    Used with GPU-cached small fields to eliminate all CPU→GPU transfer except features."""
+
+    def __init__(self, parent_dataset: "HandHdf5Dataset") -> None:
+        self.parent = parent_dataset
+
+    def __len__(self) -> int:
+        return len(self.parent)
+
+    def __getitem__(self, index: int) -> tuple[int, torch.Tensor]:
+        # Route to the correct sub-dataset to load only img_feature.
+        offset = 0
+        for ds in self.parent.dataset.datasets:
+            if index - offset < len(ds):
+                local_idx = index - offset
+                group_name, start_idx, after_len, ori_len = ds._mapping[local_idx]
+                clip_len = min(ds._subseq_len, after_len) if ds._subseq_len > 0 else after_len
+                pad_len = ds._subseq_len - clip_len if ds._subseq_len > 0 else 0
+
+                if ds.use_token == "visual_token":
+                    if ds._use_npy_features:
+                        npy_path = os.path.join(ds._feature_npy_dir, f"{group_name}.npy")
+                        feat = ds._mmap_cache(npy_path)
+                        img_feat = torch.from_numpy(np.array(feat[start_idx:start_idx+clip_len]))
+                    else:
+                        if ds.feature_archive is None:
+                            ds.feature_archive = h5py.File(ds._feature_hdf5, 'r', swmr=True, libver='latest')
+                        img_feat = torch.from_numpy(ds.feature_archive[group_name]["layer_11"][start_idx:start_idx+clip_len])
+                    if pad_len > 0:
+                        img_feat = torch.cat([img_feat, torch.zeros((pad_len, *img_feat.shape[1:]), dtype=img_feat.dtype)], dim=0)
+                elif ds.use_token == "cls_token":
+                    if ds.feature_archive is None:
+                        ds.feature_archive = h5py.File(ds._feature_hdf5, 'r', swmr=True, libver='latest')
+                    img_feat = torch.from_numpy(ds.feature_archive[group_name]["cls_token"][start_idx:start_idx+clip_len])
+                    if pad_len > 0:
+                        img_feat = torch.cat([img_feat, torch.zeros((pad_len, img_feat.shape[1]))], dim=0)
+                else:
+                    img_feat = torch.zeros((1, 768))
+
+                return index, img_feat
+            offset += len(ds)
+        raise IndexError(f"Index {index} out of range")
+
+
 class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     """Dataset which loads from our preprocessed hdf5 file.
 
@@ -751,7 +852,15 @@ class HandHdf5Dataset(torch.utils.data.Dataset[HandTrainingData]):
     def get_mano_faces(self,mano_side='left'):
         for ds in self.dataset.datasets:
             return ds.get_mano_faces(mano_side=mano_side)
-        
+
+    def build_gpu_cache(self, device: torch.device) -> dict[str, torch.Tensor]:
+        """Build GPU cache across all sub-datasets, with global indexing."""
+        caches = []
+        for ds in self.dataset.datasets:
+            caches.append(ds.build_gpu_cache(device))
+        # Concatenate along sample dimension.
+        return {k: torch.cat([c[k] for c in caches], dim=0) for k in caches[0]}
+
     def visualize_joints_in_rgb(self, index: int,out_dir:str = "tmp",resize=None,from_mano=False) -> None:
         for ds in self.dataset.datasets:
             if index < len(ds):

@@ -17,8 +17,8 @@ from loguru import logger
 
 from src.egoallo import hand_network, network, training_loss, training_utils
 from src.egoallo.data.amass import EgoAmassHdf5Dataset
-from src.egoallo.data.dataclass import collate_dataclass
-from src.egoallo.data.hand_data import HandHdf5Dataset
+from src.egoallo.data.dataclass import collate_dataclass, HandTrainingData
+from src.egoallo.data.hand_data import HandHdf5Dataset, FeatureOnlyDataset
 
 @dataclasses.dataclass(frozen=True)
 class HandTrainConfig:
@@ -161,15 +161,25 @@ def run_training(
         use_feature=config.use_feature,
     )
     print("process at dataset", config.dataset_name)
+
+    # Preload all small fields (poses, joints, betas, etc.) to GPU.
+    # DataLoader then only loads visual features + sample index.
+    if accelerator.is_main_process:
+        print("Preloading small fields to GPU...")
+    gpu_cache = train_dataset.build_gpu_cache(device)
+    if accelerator.is_main_process:
+        cache_mb = sum(v.nbytes for v in gpu_cache.values()) / 1e6
+        print(f"GPU cache: {cache_mb:.0f} MB, {len(train_dataset)} samples")
+
+    feat_dataset = FeatureOnlyDataset(train_dataset)
     train_loader = torch.utils.data.DataLoader(
-        dataset=train_dataset,
+        dataset=feat_dataset,
         batch_size=config.batch_size,
-        shuffle=True,  # Accelerate will replace this with a distributed sampler
+        shuffle=True,
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
         pin_memory=True,
         prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
-        collate_fn=collate_dataclass,
         drop_last=True,
     )
 
@@ -216,10 +226,26 @@ def run_training(
     error_cnt = 0
     # Training loop
     while True:
-        for train_batch in train_loader:
+        for batch_indices, batch_img_feat in train_loader:
             loop_metrics = next(loop_metrics_gen)
             step = loop_metrics.counter
-            
+
+            # Build HandTrainingData: small fields from GPU cache, features from DataLoader.
+            idx = batch_indices.to(device)
+            train_batch = HandTrainingData(
+                mano_betas=gpu_cache["mano_betas"][idx],
+                mano_pose=gpu_cache["mano_pose"][idx],
+                mano_joint_3d=gpu_cache["mano_joint_3d"][idx],
+                joint_2d=gpu_cache["joint_2d"][idx],
+                intrinsics=gpu_cache["intrinsics"][idx],
+                mask=gpu_cache["mask"][idx],
+                mano_side=gpu_cache["mano_side"][idx],
+                extrinsics=gpu_cache["extrinsics"][idx],
+                img_feature=batch_img_feat.to(device),
+                img_shape=gpu_cache["img_shape"][idx],
+                rgb_frames=torch.zeros(idx.shape[0], config.subseq_len, dtype=torch.uint8, device=device),
+            )
+
             # Synchronize gradients across GPUs
             with accelerator.accumulate(model):
                 loss, log_outputs = loss_helper.compute_hand_denoising_loss(
