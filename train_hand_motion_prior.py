@@ -100,7 +100,11 @@ def run_training(
     torch.multiprocessing.set_start_method('spawn')
 
     # Initialize Accelerator for multi-GPU support
-    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # Increase NCCL timeout to allow for long dataset preloading across nodes.
+    import datetime
+    ddp_kwargs = DistributedDataParallelKwargs(
+        broadcast_buffers=True,
+    )
     accelerator = Accelerator(
         project_config=ProjectConfiguration(
             project_dir=str(get_experiment_dir(config.experiment_name)),
@@ -110,8 +114,14 @@ def run_training(
             split_batches=True,
             use_seedable_sampler=True
         ),
-        mixed_precision="fp16",  # Enable mixed precision for better performance
+        mixed_precision="fp16",
+        kwargs_handlers=[ddp_kwargs],
     )
+    # Set a longer timeout for NCCL operations (default 600s is too short for preloading).
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        store = torch.distributed.distributed_c10d._get_default_store()
+        store.set_timeout(datetime.timedelta(seconds=7200))
     
     # Set random seed for reproducibility across GPUs
     set_seed(config.seed)
@@ -162,15 +172,6 @@ def run_training(
     )
     print("process at dataset", config.dataset_name)
 
-    # Preload all small fields (poses, joints, betas, etc.) to GPU.
-    # DataLoader then only loads visual features + sample index.
-    if accelerator.is_main_process:
-        print("Preloading small fields to GPU...")
-    gpu_cache = train_dataset.build_gpu_cache(device)
-    if accelerator.is_main_process:
-        cache_mb = sum(v.nbytes for v in gpu_cache.values()) / 1e6
-        print(f"GPU cache: {cache_mb:.0f} MB, {len(train_dataset)} samples")
-
     feat_dataset = FeatureOnlyDataset(train_dataset)
     train_loader = torch.utils.data.DataLoader(
         dataset=feat_dataset,
@@ -197,6 +198,17 @@ def run_training(
     model, train_loader, optim, scheduler = accelerator.prepare(
         model, train_loader, optim, scheduler
     )
+
+    # Preload all small fields to GPU AFTER accelerator.prepare() so NCCL is
+    # already initialized and won't timeout during the long preloading phase.
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print("Preloading small fields to GPU...")
+    gpu_cache = train_dataset.build_gpu_cache(device)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        cache_mb = sum(v.nbytes for v in gpu_cache.values()) / 1e6
+        print(f"GPU cache: {cache_mb:.0f} MB, {len(train_dataset)} samples")
     accelerator.register_for_checkpointing(scheduler)
 
     #Restore checkpoint if provided
