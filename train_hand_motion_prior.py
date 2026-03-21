@@ -10,7 +10,7 @@ import torch.optim.lr_scheduler
 import torch.utils.data
 import tyro
 import yaml
-from accelerate import Accelerator, DataLoaderConfiguration, DistributedDataParallelKwargs
+from accelerate import Accelerator, DataLoaderConfiguration, DistributedDataParallelKwargs, InitProcessGroupKwargs
 
 from accelerate.utils import ProjectConfiguration, set_seed
 from loguru import logger
@@ -100,11 +100,9 @@ def run_training(
     torch.multiprocessing.set_start_method('spawn')
 
     # Initialize Accelerator for multi-GPU support
-    # Increase NCCL timeout to allow for long dataset preloading across nodes.
-    import datetime
-    ddp_kwargs = DistributedDataParallelKwargs(
-        broadcast_buffers=True,
-    )
+    # Increase NCCL timeout to 2h to allow for long dataset preloading across nodes.
+    from datetime import timedelta
+    init_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=7200))
     accelerator = Accelerator(
         project_config=ProjectConfiguration(
             project_dir=str(get_experiment_dir(config.experiment_name)),
@@ -115,13 +113,8 @@ def run_training(
             use_seedable_sampler=True
         ),
         mixed_precision="fp16",
-        kwargs_handlers=[ddp_kwargs],
+        kwargs_handlers=[init_kwargs],
     )
-    # Set a longer timeout for NCCL operations (default 600s is too short for preloading).
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-        store = torch.distributed.distributed_c10d._get_default_store()
-        store.set_timeout(datetime.timedelta(seconds=7200))
     
     # Set random seed for reproducibility across GPUs
     set_seed(config.seed)
