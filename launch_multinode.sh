@@ -21,9 +21,9 @@ for i in "${!SERVERS[@]}"; do
     ssh ${NODE} "cd handtraj && git pull origin main 2>/dev/null; \
         ${ACTIVATE} && \
         ulimit -n 65536 2>/dev/null; \
-        export NCCL_BLOCKING_WAIT=1; \
-        export NCCL_TIMEOUT=7200; \
         export TORCH_NCCL_BLOCKING_WAIT=1; \
+        export NCCL_SOCKET_IFNAME=ens22f0np0; \
+        export GLOO_SOCKET_IFNAME=ens22f0np0; \
         nohup accelerate launch \
             --num_processes ${NUM_PROCESSES} \
             --num_machines ${NUM_MACHINES} \
