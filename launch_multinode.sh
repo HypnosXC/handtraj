@@ -2,14 +2,14 @@
 # Launch 32-GPU training across 4 nodes without slurm.
 # Usage: bash launch_multinode.sh
 
-MASTER_ADDR="10.10.13.25"
+MASTER_ADDR="10.10.13.23"
 MASTER_PORT=29500
 NUM_MACHINES=4
 NUM_PROCESSES=32
 CONFIG="configs/hand_motion_prior_flow_matching.yaml"
 CONDA_PATH="/public/home/xuchen/anaconda3"
 
-SERVERS=(server25 server27 server32 server57)
+SERVERS=(server23 server24 server25 server27)
 
 ACTIVATE="export PATH=${CONDA_PATH}/bin:\$PATH && eval \"\$(conda shell.bash hook 2>/dev/null)\" && conda activate handtraj"
 
